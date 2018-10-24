@@ -1,0 +1,22 @@
+download vlc-3.0.4-win32.7z from http://download.videolan.org/pub/videolan/vlc/
+
+
+github.com/shockeme
+https://github.com/shockeme/SpuDecDll.git
+Look for SpuDecDLL and clone it into your c drive:
+
+
+Directory Structure:
+stuff
+     |--vlc
+	   |---SpuDecDll
+		        |---Debug
+			|---SpuDecDll
+			|---SpuDecDll.sln
+			|---<files>
+	   |---vlc-3.04-win32
+		        |---vlc-3.0.4
+			|---sdk
+			|---plugins
+			|---<etc...>
+			|---<files>
