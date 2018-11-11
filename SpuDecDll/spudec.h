@@ -91,4 +91,5 @@ typedef struct
 	int i_x;
 	int i_y;
 } spu_properties_t;
-extern wchar_t * OcrDecodeText(subpicture_data_t * SubImageData, spu_properties_t * SpuProp);
+wchar_t * OcrDecodeText(subpicture_data_t * SubImageData, spu_properties_t * SpuProp);
+void DoMute(int startmute, int Duration, audio_output_t *p_aout);

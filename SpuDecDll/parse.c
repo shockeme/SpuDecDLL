@@ -34,11 +34,206 @@
 #endif
 
 #include "spudec.h"
+#include "..\libvlc.h"  // this is in 1 level above the plugins include area; could change include paths for this
+#include <vlc_common.h>
+#include <vlc_aout.h>
 
 #include <iostream>
 #include <fstream>
-#include <string>
 using namespace std;
+
+// This stuff is included to give us visibility into private structures that we'll use to help with getting time & muting
+#include <vlc_atomic.h>
+#include <vlc_input.h> /* FIXME Needed for input_clock_t */
+
+typedef struct
+{
+	mtime_t i_stream;
+	mtime_t i_system;
+} clock_point_t;
+typedef struct
+{
+	mtime_t i_value;
+	int     i_residue;
+
+	int     i_count;
+	int     i_divider;
+} average_t;
+#define INPUT_CLOCK_LATE_COUNT (3)
+
+// taken from src\input\clock.c
+struct input_clock_t
+{
+	/* */
+	vlc_mutex_t lock;
+
+	/* Last point
+	 * It is used to detect unexpected stream discontinuities */
+	clock_point_t last;
+
+	/* Maximal timestamp returned by input_clock_ConvertTS (in system unit) */
+	mtime_t i_ts_max;
+
+	/* Amount of extra buffering expressed in stream clock */
+	mtime_t i_buffering_duration;
+
+	/* Clock drift */
+	mtime_t i_next_drift_update;
+	average_t drift;
+
+	/* Late statistics */
+	struct
+	{
+		mtime_t  pi_value[INPUT_CLOCK_LATE_COUNT];
+		unsigned i_index;
+	} late;
+
+	/* Reference point */
+	clock_point_t ref;
+	bool          b_has_reference;
+
+	/* External clock drift */
+	mtime_t       i_external_clock;
+	bool          b_has_external_clock;
+
+	/* Current modifiers */
+	bool    b_paused;
+	int     i_rate;
+	mtime_t i_pts_delay;
+	mtime_t i_pause_date;
+};
+
+/** @struct input_clock_t
+ * This structure is used to manage clock drift and reception jitters
+ *
+ * XXX input_clock_GetTS can be called from any threads. All others functions
+ * MUST be called from one and only one thread.
+ */
+typedef struct input_clock_t input_clock_t;
+
+// Taken from src\input\decoder.c
+struct decoder_owner_sys_t
+{
+	input_thread_t  *p_input;
+	input_resource_t*p_resource;
+	input_clock_t   *p_clock;
+	int             i_last_rate;
+
+	vout_thread_t   *p_spu_vout;
+	int              i_spu_channel;
+	int64_t          i_spu_order;
+
+	sout_instance_t         *p_sout;
+	sout_packetizer_input_t *p_sout_input;
+
+	vlc_thread_t     thread;
+
+	void(*pf_update_stat)(decoder_owner_sys_t *, unsigned decoded, unsigned lost);
+
+	/* Some decoders require already packetized data (ie. not truncated) */
+	decoder_t *p_packetizer;
+	bool b_packetizer;
+
+	/* Current format in use by the output */
+	es_format_t    fmt;
+
+	/* */
+	bool           b_fmt_description;
+	vlc_meta_t     *p_description;
+	atomic_int     reload;
+
+	/* fifo */
+	block_fifo_t *p_fifo;
+
+	/* Lock for communication with decoder thread */
+	vlc_mutex_t lock;
+	vlc_cond_t  wait_request;
+	vlc_cond_t  wait_acknowledge;
+	vlc_cond_t  wait_fifo; /* TODO: merge with wait_acknowledge */
+	vlc_cond_t  wait_timed;
+
+	/* -- These variables need locking on write(only) -- */
+	audio_output_t *p_aout;
+
+	vout_thread_t   *p_vout;
+
+	/* -- Theses variables need locking on read *and* write -- */
+	/* Preroll */
+	int64_t i_preroll_end;
+	/* Pause */
+	mtime_t pause_date;
+	unsigned frames_countdown;
+	bool paused;
+
+	bool error;
+
+	/* Waiting */
+	bool b_waiting;
+	bool b_first;
+	bool b_has_data;
+
+	/* Flushing */
+	bool flushing;
+	bool b_draining;
+	atomic_bool drained;
+	bool b_idle;
+
+	/* CC */
+#define MAX_CC_DECODERS 64 /* The es_out only creates one type of es */
+	struct
+	{
+		bool b_supported;
+		decoder_cc_desc_t desc;
+		decoder_t *pp_decoder[MAX_CC_DECODERS];
+	} cc;
+
+	/* Delay */
+	mtime_t i_ts_delay;
+};
+struct input_resource_t
+{
+	atomic_uint    refs;
+
+	vlc_object_t   *p_parent;
+
+	/* This lock is used to serialize request and protect
+	 * our variables */
+	vlc_mutex_t    lock;
+
+	/* */
+	input_thread_t *p_input;
+
+	sout_instance_t *p_sout;
+	vout_thread_t   *p_vout_free;
+
+	/* This lock is used to protect vout resources access (for hold)
+	 * It is a special case because of embed video (possible deadlock
+	 * between vout window request and vout holds in some(qt) interface)
+	 */
+	vlc_mutex_t    lock_hold;
+
+	/* You need lock+lock_hold to write to the following variables and
+	 * only lock or lock_hold to read them */
+
+	vout_thread_t   **pp_vout;
+	int             i_vout;
+
+	bool            b_aout_busy;
+	audio_output_t *p_aout;
+};
+/// END stuff needed for visibility into private structures
+
+// note... these copied from libvlc_internal.h
+static inline libvlc_time_t from_mtime(mtime_t time)
+{
+	return (time + 500ULL) / 1000ULL;
+}
+
+static inline mtime_t to_mtime(libvlc_time_t time)
+{
+	return time * 1000ULL;
+}
+
 
 /*****************************************************************************
 * Local prototypes.
@@ -75,7 +270,15 @@ static inline unsigned int AddNibble(unsigned int i_code,
 * This function parses the SPU packet and, if valid, sends it to the
 * video output.
 *****************************************************************************/
-ofstream myfile;
+
+// helper function for string comparison
+void toLower(basic_string<wchar_t>& s) {
+	for (basic_string<wchar_t>::iterator p = s.begin();
+		p != s.end(); ++p) {
+		*p = towlower(*p);
+	}
+}
+
 int framenumber=0;
 subpicture_t * ParsePacket(decoder_t *p_dec)
 {
@@ -84,7 +287,6 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 	subpicture_data_t spu_data;
 	spu_properties_t spu_properties;
 
-	//msg_Dbg(p_dec, "*********** BWAHAHAHAHA *************, called parsepackets!!!!");
 	/* Allocate the subpicture internal data. */
 	p_spu = decoder_NewSubpicture(p_dec, NULL);
 	if (!p_spu) return NULL;
@@ -127,38 +329,69 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		spu_data.pi_offset[0], spu_data.pi_offset[1]);
 #endif
 
-	// TODO... Can optionally parse the text and/or render to display...
-	wchar_t * duh;
-	//	msg_Info(p_dec, "Width: %i, Height: %i, TopOff: %i, BottomOff: %i", spu_properties.i_width, spu_properties.i_height, spu_data.i_y_top_offset, spu_data.i_y_bottom_offset);
-	duh = OcrDecodeText(&spu_data, &spu_properties);
-	myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+	// TODO... Makes these parameters configurable by user
+	int RenderEnable = 1;
+	int DumpTextToFileEnabled = 1;
+	int FilterOnTheFlyEnabled = 1;
 
-	mtime_t timestamp, n;
-	char starttime[50];
-	timestamp = p_spu->i_start;
-	unsigned int milliseconds = (unsigned int)(timestamp / 1000) % 1000;
-	unsigned int seconds = (((unsigned int)(timestamp / 1000) - milliseconds) / 1000) % 60;
-	unsigned int minutes = (((((unsigned int)(timestamp / 1000) - milliseconds) / 1000) - seconds) / 60) % 60;
-	unsigned int hours = ((((((unsigned int)(timestamp / 1000) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-	
-	char endtime[50];
-	timestamp = p_spu->i_stop;
-	milliseconds = (unsigned int)(timestamp / 1000) % 1000;
-	seconds = (((unsigned int)(timestamp / 1000) - milliseconds) / 1000) % 60;
-	minutes = (((((unsigned int)(timestamp / 1000) - milliseconds) / 1000) - seconds) / 60) % 60;
-	hours = ((((((unsigned int)(timestamp / 1000) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
+	{
+		std::wstring decodedtxt(OcrDecodeText(&spu_data, &spu_properties));
+		toLower(decodedtxt);
+		if (FilterOnTheFlyEnabled)
+		{
+			int startdelay = 0;
+			int duration = 0;
+			decoder_owner_sys_t *p_owner = p_dec->p_owner;
+			mtime_t buffer_duration = p_owner->p_clock->i_buffering_duration;
 
-	n = sprintf_s(endtime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+			// Can optionally filter audio on the fly
+			// Need to create routine to see if any offensive words are found in decodedtxt.
+			if (decodedtxt.find(L"the ") != string::npos)
+			{
+				// Not sure which delays and timestamps are the correct ones to use for this calculation, but, this seems to work
+				// Also not entirely sure if the extra buffer delays are necessary, but it seems to help with lining up the mute with the subtitle
+				// I've some cases where it unmutes a bit too soon... need to study the delays some more :(
+				startdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream) + from_mtime(buffer_duration) + from_mtime(p_owner->i_ts_delay);
+				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
+				DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
+			}
+		}
+		if (DumpTextToFileEnabled)
+		{
+			ofstream myfile;
+			unsigned int timestamp, n;
+			char starttime[50];
+			char endtime[50];
 
+			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 
-	//myfile << "1\n" << p_spu->i_start << " --> " << p_spu->i_stop << "\n" << FromWide(duh) << "\n\n";
-	framenumber++;
-	myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(duh) << "\n\n";
-	myfile.close();
-	//msg_Dbg(p_dec, "Start time: %lld, End time: %lld, Test result: %s", p_spu->i_start, p_spu->i_stop, FromWide(duh));
+			timestamp = from_mtime(p_spu->i_start);
+			unsigned int milliseconds = (timestamp) % 1000;
+			unsigned int seconds = (((timestamp) - milliseconds) / 1000) % 60;
+			unsigned int minutes = (((((timestamp) - milliseconds) / 1000) - seconds) / 60) % 60;
+			unsigned int hours = ((((((timestamp) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+			n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 
-	Render(p_dec, p_spu, &spu_data, &spu_properties);
+			timestamp = from_mtime(p_spu->i_stop);
+			milliseconds = (timestamp) % 1000;
+			seconds = (((timestamp) - milliseconds) / 1000) % 60;
+			minutes = (((((timestamp) - milliseconds) / 1000) - seconds) / 60) % 60;
+			hours = ((((((timestamp) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+
+			n = sprintf_s(endtime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+
+			framenumber++;
+			myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(decodedtxt.c_str()) << "\n\n";
+			myfile.close();
+		}
+	}
+
+	if (RenderEnable)
+	{
+		Render(p_dec, p_spu, &spu_data, &spu_properties);
+	}
+
 	free(spu_data.p_data);
 
 	return p_spu;
