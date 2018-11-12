@@ -247,6 +247,7 @@ static int  ParseRLE(decoder_t *, subpicture_data_t *,
 	const spu_properties_t *);
 static void Render(decoder_t *, subpicture_t *, subpicture_data_t *,
 	const spu_properties_t *);
+static bool ParseForWords(std::wstring sentence);
 
 /*****************************************************************************
 * AddNibble: read a nibble from a source packet and add it to our integer.
@@ -264,12 +265,39 @@ static inline unsigned int AddNibble(unsigned int i_code,
 	}
 }
 
+static wstring badwords[10];
+
 /*****************************************************************************
-* ParsePacket: parse an SPU packet and send it to the video output
-*****************************************************************************
-* This function parses the SPU packet and, if valid, sends it to the
-* video output.
+* ParseForWords: parse sentence and return TRUE if a cuss word is found
+* TODO: need to get a text file parsed at the start of the movie and then store 
+* the words into an array for this function
 *****************************************************************************/
+
+static bool ParseForWords(std::wstring sentence)
+{
+	//wstring badwords[10];
+	size_t i;
+
+	badwords[0] = L"the";
+	badwords[1] = L"hello";
+	badwords[2] = L"them";
+	badwords[3] = L"for";
+	badwords[4] = L"people";
+	badwords[5] = L"stark";
+	badwords[6] = L"poop1";
+	badwords[7] = L"poop2";
+	badwords[8] = L"poop3";
+	badwords[9] = L"poop4";
+
+	size_t n = sizeof(badwords) / sizeof(badwords[0]);
+
+	for (i = 0; i < n; i++)
+	{
+		if (sentence.find (badwords[i]) != string::npos)
+		return TRUE;
+	}
+	return FALSE;
+}
 
 // helper function for string comparison
 void toLower(basic_string<wchar_t>& s) {
@@ -278,6 +306,13 @@ void toLower(basic_string<wchar_t>& s) {
 		*p = towlower(*p);
 	}
 }
+
+/*****************************************************************************
+* ParsePacket: parse an SPU packet and send it to the video output
+*****************************************************************************
+* This function parses the SPU packet and, if valid, sends it to the
+* video output.
+*****************************************************************************/
 
 int framenumber=0;
 subpicture_t * ParsePacket(decoder_t *p_dec)
@@ -333,7 +368,7 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 	int RenderEnable = 1;
 	int DumpTextToFileEnabled = 1;
 	int FilterOnTheFlyEnabled = 1;
-
+	
 	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
 	{
 		std::wstring decodedtxt(OcrDecodeText(&spu_data, &spu_properties));
@@ -347,7 +382,9 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 
 			// Can optionally filter audio on the fly
 			// Need to create routine to see if any offensive words are found in decodedtxt.
-			if (decodedtxt.find(L"the ") != string::npos)
+			
+			if (ParseForWords(decodedtxt) == TRUE)
+			//if (decodedtxt.find(L"the ") != string::npos)
 			{
 				// Not sure which delays and timestamps are the correct ones to use for this calculation, but, this seems to work
 				// Also not entirely sure if the extra buffer delays are necessary, but it seems to help with lining up the mute with the subtitle
@@ -992,3 +1029,4 @@ static void Render(decoder_t *p_dec, subpicture_t *p_spu,
 	fmt.p_palette = NULL;
 	video_format_Clean(&fmt);
 }
+
