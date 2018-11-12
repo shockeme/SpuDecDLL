@@ -40,6 +40,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <vector>
 using namespace std;
 
 // This stuff is included to give us visibility into private structures that we'll use to help with getting time & muting
@@ -265,8 +266,6 @@ static inline unsigned int AddNibble(unsigned int i_code,
 	}
 }
 
-static wstring badwords[10];
-
 /*****************************************************************************
 * ParseForWords: parse sentence and return TRUE if a cuss word is found
 * TODO: need to get a text file parsed at the start of the movie and then store 
@@ -275,23 +274,21 @@ static wstring badwords[10];
 
 static bool ParseForWords(std::wstring sentence)
 {
-	//wstring badwords[10];
 	size_t i;
+	std::vector<std::wstring> badwords;
 
-	badwords[0] = L"the";
-	badwords[1] = L"hello";
-	badwords[2] = L"them";
-	badwords[3] = L"for";
-	badwords[4] = L"people";
-	badwords[5] = L"stark";
-	badwords[6] = L"poop1";
-	badwords[7] = L"poop2";
-	badwords[8] = L"poop3";
-	badwords[9] = L"poop4";
+	badwords.push_back(L"the");
+	badwords.push_back(L"hello");
+	badwords.push_back(L"them");
+	badwords.push_back(L"for");
+	badwords.push_back(L"people");
+	badwords.push_back(L"stark");
+	badwords.push_back(L"poop1");
+	badwords.push_back(L"poop2");
+	badwords.push_back(L"poop3");
+	badwords.push_back(L"poop4");
 
-	size_t n = sizeof(badwords) / sizeof(badwords[0]);
-
-	for (i = 0; i < n; i++)
+	for (i = 0; i < badwords.size(); i++)
 	{
 		if (sentence.find (badwords[i]) != string::npos)
 		return TRUE;
