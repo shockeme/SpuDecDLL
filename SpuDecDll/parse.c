@@ -191,37 +191,7 @@ struct decoder_owner_sys_t
 	/* Delay */
 	mtime_t i_ts_delay;
 };
-struct input_resource_t
-{
-	atomic_uint    refs;
 
-	vlc_object_t   *p_parent;
-
-	/* This lock is used to serialize request and protect
-	 * our variables */
-	vlc_mutex_t    lock;
-
-	/* */
-	input_thread_t *p_input;
-
-	sout_instance_t *p_sout;
-	vout_thread_t   *p_vout_free;
-
-	/* This lock is used to protect vout resources access (for hold)
-	 * It is a special case because of embed video (possible deadlock
-	 * between vout window request and vout holds in some(qt) interface)
-	 */
-	vlc_mutex_t    lock_hold;
-
-	/* You need lock+lock_hold to write to the following variables and
-	 * only lock or lock_hold to read them */
-
-	vout_thread_t   **pp_vout;
-	int             i_vout;
-
-	bool            b_aout_busy;
-	audio_output_t *p_aout;
-};
 /// END stuff needed for visibility into private structures
 
 // note... these copied from libvlc_internal.h
