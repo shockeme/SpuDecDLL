@@ -264,6 +264,7 @@ static bool ParseForWords(std::wstring sentence)
 		if (sentence.find(badwords[i]) != string::npos)
 		{
 			// TODO:  update search to ensure non alpha characters before or after word
+			//   Need to be careful about this, as would need to check every instance of words in a single instance of subtitle
 			//if(!std::isalpha(beforeword) && !std::isalpha(afterword))
 			return TRUE;
 		}
