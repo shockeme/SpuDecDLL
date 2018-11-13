@@ -40,7 +40,9 @@
 
 #include <iostream>
 #include <fstream>
+#include <sstream>
 #include <vector>
+#include <cctype>
 using namespace std;
 
 // This stuff is included to give us visibility into private structures that we'll use to help with getting time & muting
@@ -241,27 +243,30 @@ static inline unsigned int AddNibble(unsigned int i_code,
 * TODO: need to get a text file parsed at the start of the movie and then store 
 * the words into an array for this function
 *****************************************************************************/
+std::vector<std::wstring> badwords;
+static void LoadWords()
+{
+	// Todo:  change input file format, or somehow obfuscate the contents
+	std::wifstream infile("filter_words.txt");
+	std::wstring line;
+	while (std::getline(infile, line))
+	{
+		badwords.push_back(line);
+	}
+}
 
 static bool ParseForWords(std::wstring sentence)
 {
 	size_t i;
-	std::vector<std::wstring> badwords;
-
-	badwords.push_back(L"the");
-	badwords.push_back(L"hello");
-	badwords.push_back(L"them");
-	badwords.push_back(L"for");
-	badwords.push_back(L"people");
-	badwords.push_back(L"stark");
-	badwords.push_back(L"poop1");
-	badwords.push_back(L"poop2");
-	badwords.push_back(L"poop3");
-	badwords.push_back(L"poop4");
 
 	for (i = 0; i < badwords.size(); i++)
 	{
-		if (sentence.find (badwords[i]) != string::npos)
-		return TRUE;
+		if (sentence.find(badwords[i]) != string::npos)
+		{
+			// TODO:  update search to ensure non alpha characters before or after word
+			//if(!std::isalpha(beforeword) && !std::isalpha(afterword))
+			return TRUE;
+		}
 	}
 	return FALSE;
 }
@@ -282,6 +287,7 @@ void toLower(basic_string<wchar_t>& s) {
 *****************************************************************************/
 
 int framenumber=0;
+static int WordListLoaded = 0;
 subpicture_t * ParsePacket(decoder_t *p_dec)
 {
 	decoder_sys_t *p_sys = p_dec->p_sys;
@@ -332,10 +338,17 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 #endif
 
 	// TODO... Makes these parameters configurable by user
+	// Todo:  Enable this only once the movie has started, else it impacts dvd menus
 	int RenderEnable = 1;
 	int DumpTextToFileEnabled = 1;
 	int FilterOnTheFlyEnabled = 1;
-	
+	// Todo:  should maybe move this outside of parsepackets
+	if (WordListLoaded == 0)
+	{
+		LoadWords();
+		WordListLoaded = 1;
+	}
+
 	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
 	{
 		std::wstring decodedtxt(OcrDecodeText(&spu_data, &spu_properties));
@@ -347,15 +360,12 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			decoder_owner_sys_t *p_owner = p_dec->p_owner;
 			mtime_t buffer_duration = p_owner->p_clock->i_buffering_duration;
 
-			// Can optionally filter audio on the fly
-			// Need to create routine to see if any offensive words are found in decodedtxt.
-			
 			if (ParseForWords(decodedtxt) == TRUE)
-			//if (decodedtxt.find(L"the ") != string::npos)
 			{
 				// Not sure which delays and timestamps are the correct ones to use for this calculation, but, this seems to work
 				// Also not entirely sure if the extra buffer delays are necessary, but it seems to help with lining up the mute with the subtitle
 				// I've some cases where it unmutes a bit too soon... need to study the delays some more :(
+				// Todo:  Are these reliable times?  Maybe need to check for cases where startdelay could be negative?
 				startdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream) + from_mtime(buffer_duration) + from_mtime(p_owner->i_ts_delay);
 				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
 				DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
