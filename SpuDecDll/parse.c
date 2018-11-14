@@ -255,6 +255,37 @@ static void LoadWords()
 	}
 }
 
+static int RenderEnable = 1;
+static int DumpTextToFileEnabled = 1;
+static int FilterOnTheFlyEnabled = 1;
+
+static void LoadConfig()
+{
+	// Todo:  change input file format, or somehow obfuscate the contents
+	std::vector<std::wstring> configfile;
+	std::wifstream infile("config.txt");
+	std::wstring line;
+
+	while (std::getline(infile, line))
+	{
+		configfile.push_back(line);
+	}
+
+	// text file = config.txt put in the same directory as the vlc.exe file. 
+	// the format is very simple where each line represents the setting
+	// config.txt:
+	// 1
+	// 0
+	// 1
+	//
+	// this means that RenderEnable is true (=1), DumpTextToFileEnabled = false (=0), and FilterOnTheFlyEnabled = true (=1)
+	// We should make this easier by putting in RenderEnable=1 in the text file, but I can't figure out how to split the string and get just the "1" portion.
+
+	RenderEnable = stoi(configfile[0], 0, 10); 
+	DumpTextToFileEnabled = stoi(configfile[1], 0, 10);
+	FilterOnTheFlyEnabled = stoi(configfile[2], 0, 10);
+}
+
 static bool ParseForWords(std::wstring sentence)
 {
 	size_t i;
@@ -286,9 +317,10 @@ void toLower(basic_string<wchar_t>& s) {
 * This function parses the SPU packet and, if valid, sends it to the
 * video output.
 *****************************************************************************/
-
 int framenumber=0;
 static int WordListLoaded = 0;
+static int ConfigFileLoaded = 0;
+
 subpicture_t * ParsePacket(decoder_t *p_dec)
 {
 	decoder_sys_t *p_sys = p_dec->p_sys;
@@ -340,14 +372,17 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 
 	// TODO... Makes these parameters configurable by user
 	// Todo:  Enable this only once the movie has started, else it impacts dvd menus
-	int RenderEnable = 1;
-	int DumpTextToFileEnabled = 1;
-	int FilterOnTheFlyEnabled = 1;
 	// Todo:  should maybe move this outside of parsepackets
 	if (WordListLoaded == 0)
 	{
 		LoadWords();
 		WordListLoaded = 1;
+	}
+
+	if (ConfigFileLoaded == 0)
+	{
+		LoadConfig();
+		ConfigFileLoaded = 1;
 	}
 
 	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
