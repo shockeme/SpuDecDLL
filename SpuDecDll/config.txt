@@ -1,0 +1,3 @@
+RenderEnable 0
+DumpTextToFileEnabled 1
+FilterOnTheFlyEnabled 1

@@ -43,6 +43,7 @@
 #include <sstream>
 #include <vector>
 #include <cctype>
+#include <map>
 using namespace std;
 
 // This stuff is included to give us visibility into private structures that we'll use to help with getting time & muting
@@ -244,6 +245,12 @@ static inline unsigned int AddNibble(unsigned int i_code,
 * the words into an array for this function
 *****************************************************************************/
 std::vector<std::wstring> badwords;
+static std::map<std::wstring, int> ConfigOptionMap;
+// default values now defined in map; may eventually remove these vars if map is used instead
+static int RenderEnable;
+static int DumpTextToFileEnabled;
+static int FilterOnTheFlyEnabled;
+
 static void LoadWords()
 {
 	// Todo:  change input file format, or somehow obfuscate the contents
@@ -251,52 +258,82 @@ static void LoadWords()
 	std::wstring line;
 	while (std::getline(infile, line))
 	{
-		badwords.push_back(line);
+		// todo:  should also check if string is not empty but has only white space, and ignore that line...
+		if (!line.empty())
+		{
+			// each string from subtitle will be parsed and space will be inserted for every non alpha character in the string so we can reliably filter on specific words
+			// here we will default to adding space at front/end of word so we match on the exact word
+			// however, if first or last char is *, then don't put space at front/end; else put space at front/end so we only search this word
+			wstring FirstChar = L" ";
+			wstring LastChar = L" ";
+			if (line.front() == L'*')
+			{
+				line.erase(0, 1);
+				FirstChar = L"";
+			}
+			if (line.back() == L'*')
+			{
+				line.pop_back();
+				LastChar = L"";
+			}
+			badwords.push_back(FirstChar + line + LastChar);
+		}
 	}
 }
 
-static int RenderEnable = 1;
-static int DumpTextToFileEnabled = 1;
-static int FilterOnTheFlyEnabled = 1;
-
+// QUESTION:  Should we merge with bad word file?  Just have 1 file that has the options & words to filter?
+// text file = config.txt put in the same directory as the vlc.exe file. 
+// the format is very simple where each line represents the setting
+// config.txt:
+// RenderEnable 1
+// DumpTextToFileEnabled 0
+// FilterOnTheFlyEnabled 1
+//
+// this means that RenderEnable is true (=1), DumpTextToFileEnabled = false (=0), and FilterOnTheFlyEnabled = true (=1)
 static void LoadConfig()
 {
-	// Todo:  change input file format, or somehow obfuscate the contents
 	std::vector<std::wstring> configfile;
 	std::wifstream infile("config.txt");
 	std::wstring line;
+	// init some default values, since these will be used
+	ConfigOptionMap[L"RenderEnable"] = 1;
+	ConfigOptionMap[L"DumpTextToFileEnabled"] = 1;
+	ConfigOptionMap[L"FilterOnTheFlyEnabled"] = 1;
 
 	while (std::getline(infile, line))
 	{
-		configfile.push_back(line);
+		std::wstringstream iss(line);
+		int ConfigValue;
+		std::wstring ConfigOption;
+		if (!(iss >> ConfigOption >> ConfigValue)) { break; } // error
+		ConfigOptionMap[ConfigOption] = ConfigValue;
 	}
-
-	// text file = config.txt put in the same directory as the vlc.exe file. 
-	// the format is very simple where each line represents the setting
-	// config.txt:
-	// 1
-	// 0
-	// 1
-	//
-	// this means that RenderEnable is true (=1), DumpTextToFileEnabled = false (=0), and FilterOnTheFlyEnabled = true (=1)
-	// We should make this easier by putting in RenderEnable=1 in the text file, but I can't figure out how to split the string and get just the "1" portion.
-
-	RenderEnable = stoi(configfile[0], 0, 10); 
-	DumpTextToFileEnabled = stoi(configfile[1], 0, 10);
-	FilterOnTheFlyEnabled = stoi(configfile[2], 0, 10);
+	// can change to just use the map directly in other functions, rather than assigning to these vars
+	RenderEnable = ConfigOptionMap[L"RenderEnable"];
+	DumpTextToFileEnabled = ConfigOptionMap[L"DumpTextToFileEnabled"];
+	FilterOnTheFlyEnabled = ConfigOptionMap[L"FilterOnTheFlyEnabled"];
 }
 
 static bool ParseForWords(std::wstring sentence)
 {
 	size_t i;
-
+	size_t sentenceindx;
 	for (i = 0; i < badwords.size(); i++)
 	{
+		// replace all non alpha characters, including start & end of line with space
+		// todo: is this OK?  it's replacing all non letters, including ', which will split contractions.
+		// debug... seems this is failing on a string that doesn't decode properly;  Not sure if we can solve decode problem, but this shouldn't fail
+		for (sentenceindx = 0; sentenceindx < sentence.size(); sentenceindx++)
+		{
+			if (!std::isalpha(sentence[sentenceindx]))
+			{
+				sentence[sentenceindx] = ' ';
+			}
+		}
+		sentence.insert(0, 1, L' ');
+		sentence.push_back(L' ');
 		if (sentence.find(badwords[i]) != string::npos)
 		{
-			// TODO:  update search to ensure non alpha characters before or after word
-			//   Need to be careful about this, as would need to check every instance of words in a single instance of subtitle
-			//if(!std::isalpha(beforeword) && !std::isalpha(afterword))
 			return TRUE;
 		}
 	}
@@ -391,8 +428,8 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		toLower(decodedtxt);
 		if (FilterOnTheFlyEnabled)
 		{
-			int startdelay = 0;
-			int duration = 0;
+			libvlc_time_t startdelay = 0;
+			libvlc_time_t duration = 0;
 			decoder_owner_sys_t *p_owner = p_dec->p_owner;
 			mtime_t buffer_duration = p_owner->p_clock->i_buffering_duration;
 
@@ -404,13 +441,15 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 				// Todo:  Are these reliable times?  Maybe need to check for cases where startdelay could be negative?
 				startdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream) + from_mtime(buffer_duration) + from_mtime(p_owner->i_ts_delay);
 				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
+				// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
+				//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
 				DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
 			}
 		}
 		if (DumpTextToFileEnabled)
 		{
 			ofstream myfile;
-			unsigned int timestamp, n;
+			libvlc_time_t timestamp, n;
 			char starttime[50];
 			char endtime[50];
 
