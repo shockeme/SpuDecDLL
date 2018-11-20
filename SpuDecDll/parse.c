@@ -42,7 +42,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <cctype>
+#include <wctype.h>
 #include <map>
 using namespace std;
 
@@ -292,7 +292,6 @@ static void LoadWords()
 // this means that RenderEnable is true (=1), DumpTextToFileEnabled = false (=0), and FilterOnTheFlyEnabled = true (=1)
 static void LoadConfig()
 {
-	std::vector<std::wstring> configfile;
 	std::wifstream infile("config.txt");
 	std::wstring line;
 	// init some default values, since these will be used
@@ -325,7 +324,7 @@ static bool ParseForWords(std::wstring sentence)
 		// debug... seems this is failing on a string that doesn't decode properly;  Not sure if we can solve decode problem, but this shouldn't fail
 		for (sentenceindx = 0; sentenceindx < sentence.size(); sentenceindx++)
 		{
-			if (!std::isalpha(sentence[sentenceindx]))
+			if (!iswalpha(sentence[sentenceindx]))
 			{
 				sentence[sentenceindx] = ' ';
 			}
@@ -338,6 +337,43 @@ static bool ParseForWords(std::wstring sentence)
 		}
 	}
 	return FALSE;
+}
+
+static std::map<std::wstring, int> FilterFileMap;
+static int FilterFileLoaded = 0;
+static void LoadFilterFile()
+{
+	std::vector<std::wstring> filterfile;
+	std::wifstream infile("AntMan.txt");
+	std::wstring line;
+
+	while (std::getline(infile, line))
+	{
+		std::wstringstream iss(line);
+		int ConfigValue;
+		std::wstring ConfigOption;
+		if (!(iss >> ConfigOption >> ConfigValue)) { break; } // error
+		FilterFileMap[ConfigOption] = ConfigValue;
+	}
+
+	/*do
+{
+	//mute;00:01:52,840 --> 00:01:54,888
+	string[] FilterFileEntry = myFilterFile.ReadLine().Split(';'); // split based on the ; to split the action and the times
+	ActionList.Add(FilterFileEntry[0]); // add the "mute" or "skip" to the list.
+	string[] times = FilterFileEntry[1].Split(new[] { " --> " }, StringSplitOptions.None); // split based on the --> to split the start and end times
+
+	times[0] = times[0].Substring(0, times[0].Length - 4); // remove the last 4 characters of the string as we don't really need them
+	TimeSpan ts1 = TimeSpan.Parse(times[0]); // convert the numbers to a time
+	StartList.Add(ts1.TotalMilliseconds.ToString()); // add the start time to the list
+
+	times[1] = times[1].Substring(0, times[1].Length - 4);
+	TimeSpan ts2 = TimeSpan.Parse(times[1]);
+	EndList.Add(ts2.TotalMilliseconds.ToString()); // add the end time to the list
+
+} while (!myFilterFile.EndOfStream);
+*/
+	FilterFileLoaded = 1;
 }
 
 // helper function for string comparison
@@ -422,6 +458,7 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		ConfigFileLoaded = 1;
 	}
 
+	decoder_owner_sys_t *p_owner = p_dec->p_owner;
 	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
 	{
 		std::wstring decodedtxt(OcrDecodeText(&spu_data, &spu_properties));
@@ -429,8 +466,8 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		if (FilterOnTheFlyEnabled)
 		{
 			libvlc_time_t startdelay = 0;
+			libvlc_time_t basestartdelay = 0;
 			libvlc_time_t duration = 0;
-			decoder_owner_sys_t *p_owner = p_dec->p_owner;
 			mtime_t buffer_duration = p_owner->p_clock->i_buffering_duration;
 
 			if (ParseForWords(decodedtxt) == TRUE)
@@ -439,21 +476,28 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 				// Also not entirely sure if the extra buffer delays are necessary, but it seems to help with lining up the mute with the subtitle
 				// I've some cases where it unmutes a bit too soon... need to study the delays some more :(
 				// Todo:  Are these reliable times?  Maybe need to check for cases where startdelay could be negative?
-				startdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream) + from_mtime(buffer_duration) + from_mtime(p_owner->i_ts_delay);
+				if (p_owner->p_clock->last.i_stream <= p_spu->i_start)
+				{
+					basestartdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream);
+				}
+				startdelay = basestartdelay + from_mtime(buffer_duration) + from_mtime(p_owner->i_ts_delay);
 				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
 				// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
 				//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
+				// for debug... would need myfile declaration for this to be used
+				//myfile << "Calling mute... startdelay: " << startdelay << " duration: " << duration << "\n";
+				//myfile << "i_start: " << from_mtime(p_spu->i_start) << " last.i_stream: " << from_mtime(p_owner->p_clock->last.i_stream) << "\n";
 				DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
 			}
 		}
 		if (DumpTextToFileEnabled)
 		{
 			ofstream myfile;
+			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 			libvlc_time_t timestamp, n;
 			char starttime[50];
 			char endtime[50];
 
-			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 
 			timestamp = from_mtime(p_spu->i_start);
 			unsigned int milliseconds = (timestamp) % 1000;
@@ -467,11 +511,38 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			seconds = (((timestamp) - milliseconds) / 1000) % 60;
 			minutes = (((((timestamp) - milliseconds) / 1000) - seconds) / 60) % 60;
 			hours = ((((((timestamp) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-
 			n = sprintf_s(endtime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 
 			framenumber++;
 			myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(decodedtxt.c_str()) << "\n\n";
+
+
+			input_thread_t *p_input_thread = p_owner->p_input;
+			/*
+			//libvlc_time_t i_time;
+			if (p_input_thread)
+			{
+				// load filter file
+				if (!FilterFileLoaded)
+				{
+					LoadFilterFile();
+				}
+				// parsing code from C#
+				vlc_object_hold(p_input_thread);
+				// read time
+				timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
+				unsigned int milliseconds = (timestamp) % 1000;
+				unsigned int seconds = (((timestamp)-milliseconds) / 1000) % 60;
+				unsigned int minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
+				unsigned int hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+				n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+
+				myfile << "timvar: " << starttime << "\n";
+				// set new time
+				var_SetInteger(p_input_thread, "time", to_mtime(timestamp + 10000));
+				vlc_object_release(p_input_thread);
+			}
+			*/
 			myfile.close();
 		}
 	}
