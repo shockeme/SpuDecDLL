@@ -251,6 +251,12 @@ static int RenderEnable;
 static int DumpTextToFileEnabled;
 static int FilterOnTheFlyEnabled;
 
+// This expects words to be listed 1 on each line with or without wildcard.  With no wildcards, then it will only match on the exact word
+// example contents for filter_words.txt:
+//  badword_a
+//  *badword_b
+//  badword_c*
+//  *badword_d*
 static void LoadWords()
 {
 	// Todo:  change input file format, or somehow obfuscate the contents
@@ -340,41 +346,63 @@ static bool ParseForWords(std::wstring sentence)
 	return FALSE;
 }
 
-static std::map<std::wstring, int> FilterFileMap;
+#define SRT_BUF_SIZE 50
+static void vlctime_to_srttime(char *srtbuf, libvlc_time_t itime)
+{
+	libvlc_time_t n;
+	unsigned int milliseconds = (itime) % 1000;
+	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
+	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
+	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+	n = sprintf_s((char(&)[SRT_BUF_SIZE])srtbuf, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+}
+
+static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srtbuf)
+{
+}
+
+typedef struct
+{
+	wstring FilterType;
+	libvlc_time_t starttime;
+	libvlc_time_t endtime;
+} FilterFileEntry;
+std::vector<FilterFileEntry> FilterFileArray;
+
 static int FilterFileLoaded = 0;
 static void LoadFilterFile()
 {
 	std::vector<std::wstring> filterfile;
-	std::wifstream infile("AntMan.txt");
-	std::wstring line;
+	std::wifstream infile("FilterFile.txt"); // How do we allow user to provide input to determine filter file name??
+	std::wstring cmdline;
+	std::wstring srttime;
+	libvlc_time_t starttime;
+	libvlc_time_t endtime;
 
-	while (std::getline(infile, line))
+	// first getline gets command (mute/skip)
+	while (std::getline(infile, cmdline, L';'))
 	{
-		std::wstringstream iss(line);
-		int ConfigValue;
-		std::wstring ConfigOption;
-		if (!(iss >> ConfigOption >> ConfigValue)) { break; } // error
-		FilterFileMap[ConfigOption] = ConfigValue;
+		if ((cmdline == L"mute") || (cmdline == L"skip"))
+		{
+			// next getline gets srt start time, ignoring the ms
+			std::getline(infile, srttime, L' ');
+			// process start time
+			srttime_to_vlctime(starttime, srttime);
+
+			// get & throw away intermediate content on line, then get srt end time
+			std::getline(infile, srttime, L' ');
+			std::getline(infile, srttime);  // remainder of line should be the srt end time
+
+			// process endtime
+			srttime_to_vlctime(endtime, srttime);
+
+			FilterFileArray.push_back({ cmdline, starttime, endtime });
+		}
 	}
-
-	/*do
-{
-	//mute;00:01:52,840 --> 00:01:54,888
-	string[] FilterFileEntry = myFilterFile.ReadLine().Split(';'); // split based on the ; to split the action and the times
-	ActionList.Add(FilterFileEntry[0]); // add the "mute" or "skip" to the list.
-	string[] times = FilterFileEntry[1].Split(new[] { " --> " }, StringSplitOptions.None); // split based on the --> to split the start and end times
-
-	times[0] = times[0].Substring(0, times[0].Length - 4); // remove the last 4 characters of the string as we don't really need them
-	TimeSpan ts1 = TimeSpan.Parse(times[0]); // convert the numbers to a time
-	StartList.Add(ts1.TotalMilliseconds.ToString()); // add the start time to the list
-
-	times[1] = times[1].Substring(0, times[1].Length - 4);
-	TimeSpan ts2 = TimeSpan.Parse(times[1]);
-	EndList.Add(ts2.TotalMilliseconds.ToString()); // add the end time to the list
-
-} while (!myFilterFile.EndOfStream);
-*/
 	FilterFileLoaded = 1;
+
+	// Now what???
+	// need to figure out how to process the file during movie playback
 }
 
 // helper function for string comparison
@@ -385,16 +413,7 @@ void toLower(basic_string<wchar_t>& s) {
 	}
 }
 
-#define SRT_BUF_SIZE 50
-void vlctime_to_srttime(unsigned char *srtbuf, libvlc_time_t itime)
-{
-	libvlc_time_t n;
-	unsigned int milliseconds = (itime) % 1000;
-	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
-	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
-	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s((char(&)[SRT_BUF_SIZE])srtbuf, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-}
+
 
 /*****************************************************************************
 * ParsePacket: parse an SPU packet and send it to the video output
@@ -515,17 +534,19 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			char endtime[SRT_BUF_SIZE];
 
 			timestamp = from_mtime(p_spu->i_start);
+			//broken!!!... vlctime_to_srttime(starttime, timestamp);
 			unsigned int milliseconds = (timestamp) % 1000;
-			unsigned int seconds = (((timestamp) - milliseconds) / 1000) % 60;
-			unsigned int minutes = (((((timestamp) - milliseconds) / 1000) - seconds) / 60) % 60;
-			unsigned int hours = ((((((timestamp) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+			unsigned int seconds = (((timestamp)-milliseconds) / 1000) % 60;
+			unsigned int minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
+			unsigned int hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
 			n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 
 			timestamp = from_mtime(p_spu->i_stop);
+			//broken!!!... vlctime_to_srttime(endtime, timestamp);
 			milliseconds = (timestamp) % 1000;
-			seconds = (((timestamp) - milliseconds) / 1000) % 60;
-			minutes = (((((timestamp) - milliseconds) / 1000) - seconds) / 60) % 60;
-			hours = ((((((timestamp) - milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+			seconds = (((timestamp)-milliseconds) / 1000) % 60;
+			minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
+			hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
 			n = sprintf_s(endtime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 
 			framenumber++;
@@ -549,26 +570,29 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		input_thread_t *p_input_thread = p_owner->p_input;
 		libvlc_time_t timestamp, n;
 		char starttime[SRT_BUF_SIZE];
+		// load filter file
+		if (!FilterFileLoaded)
+		{
+			LoadFilterFile();
+		}
+
+		// need to figure out how to take action when movie time hits the start time in one of the entries in FilterFileArray
+		// if (FilterFileArray[x].starttime ~= p_owner->p_clock->last.i_stream) then take action and stop at end time
 		if (p_input_thread)
 		{
-			// load filter file
-			if (!FilterFileLoaded)
-			{
-				LoadFilterFile();
-			}
-			// parsing code from C#
+			// here's how to read current time, and to set new time if command was a 'skip'
 			vlc_object_hold(p_input_thread);
 			// read time
 			timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
+			// for debug only....
 			// convert to srt format for debug write to file
-			unsigned int milliseconds = (timestamp) % 1000;
-			unsigned int seconds = (((timestamp)-milliseconds) / 1000) % 60;
-			unsigned int minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
-			unsigned int hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-			n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-
+			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+			// broken!!!... vlctime_to_srttime(starttime, timestamp);
 			myfile << "timvar: " << starttime << "\n";
-			// set new time
+			myfile.close();
+			// end debug...
+
+			// set new time (should be set to end time, FilterFileArray[x].endtime)
 			var_SetInteger(p_input_thread, "time", to_mtime(timestamp + 10000));
 			vlc_object_release(p_input_thread);
 		}
