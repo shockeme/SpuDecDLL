@@ -4,3 +4,6 @@ them
 for
 people
 frodo
+*frodo
+frodo*
+*frodo*
