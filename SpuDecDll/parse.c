@@ -298,6 +298,7 @@ static void LoadConfig()
 	ConfigOptionMap[L"RenderEnable"] = 1;
 	ConfigOptionMap[L"DumpTextToFileEnabled"] = 1;
 	ConfigOptionMap[L"FilterOnTheFlyEnabled"] = 1;
+	ConfigOptionMap[L"VideoFilterEnabled"] = 0;
 
 	while (std::getline(infile, line))
 	{
@@ -384,6 +385,17 @@ void toLower(basic_string<wchar_t>& s) {
 	}
 }
 
+#define SRT_BUF_SIZE 50
+void vlctime_to_srttime(unsigned char *srtbuf, libvlc_time_t itime)
+{
+	libvlc_time_t n;
+	unsigned int milliseconds = (itime) % 1000;
+	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
+	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
+	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+	n = sprintf_s((char(&)[SRT_BUF_SIZE])srtbuf, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+}
+
 /*****************************************************************************
 * ParsePacket: parse an SPU packet and send it to the video output
 *****************************************************************************
@@ -461,6 +473,7 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 	decoder_owner_sys_t *p_owner = p_dec->p_owner;
 	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
 	{
+		ofstream myfile;
 		std::wstring decodedtxt(OcrDecodeText(&spu_data, &spu_properties));
 		toLower(decodedtxt);
 		if (FilterOnTheFlyEnabled)
@@ -468,36 +481,38 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			libvlc_time_t startdelay = 0;
 			libvlc_time_t basestartdelay = 0;
 			libvlc_time_t duration = 0;
-			mtime_t buffer_duration = p_owner->p_clock->i_buffering_duration;
 
 			if (ParseForWords(decodedtxt) == TRUE)
 			{
 				// Not sure which delays and timestamps are the correct ones to use for this calculation, but, this seems to work
-				// Also not entirely sure if the extra buffer delays are necessary, but it seems to help with lining up the mute with the subtitle
-				// I've some cases where it unmutes a bit too soon... need to study the delays some more :(
-				// Todo:  Are these reliable times?  Maybe need to check for cases where startdelay could be negative?
+				// Also not entirely sure if the extra i_buffering_duration delay is necessary (pts delay does seem necessary), but it seems to help with lining up the mute with the subtitle
+				// I've some cases where it mutes a bit late or unmutes a bit early... not sure what causes this
+				// Todo:  Are these reliable times?
+				// i've run into cases where i_stream was greater than i_start, not sure why, but for now, only set startdelay if i_stream <= i_start
+				//   leaving basestart delay to be 0 otherwise... not sure if this is right way to handle this
 				if (p_owner->p_clock->last.i_stream <= p_spu->i_start)
 				{
 					basestartdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream);
 				}
-				startdelay = basestartdelay + from_mtime(buffer_duration) + from_mtime(p_owner->i_ts_delay);
+				startdelay = basestartdelay + from_mtime(p_owner->p_clock->i_buffering_duration) + from_mtime(p_owner->p_clock->i_pts_delay);
 				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
 				// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
 				//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
-				// for debug... would need myfile declaration for this to be used
-				//myfile << "Calling mute... startdelay: " << startdelay << " duration: " << duration << "\n";
+				// for debug... 
+				//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+				//myfile << "Calling mute... start: " << p_spu->i_start << " stop: " << p_spu->i_stop << " istream: " << p_owner->p_clock->last.i_stream << " ipts: " << p_sys->i_pts << " buffer duration: " << buffer_duration << " tsdelay: " << p_owner->i_ts_delay << " ptsdelay: " << p_owner->p_clock->i_pts_delay << "\n";
 				//myfile << "i_start: " << from_mtime(p_spu->i_start) << " last.i_stream: " << from_mtime(p_owner->p_clock->last.i_stream) << "\n";
+				// need to look into using i_pts_delay.... seems this is a factor in delay and changes, potentially from play to play
+				//myfile.close();
 				DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
 			}
 		}
 		if (DumpTextToFileEnabled)
 		{
-			ofstream myfile;
 			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 			libvlc_time_t timestamp, n;
-			char starttime[50];
-			char endtime[50];
-
+			char starttime[SRT_BUF_SIZE];
+			char endtime[SRT_BUF_SIZE];
 
 			timestamp = from_mtime(p_spu->i_start);
 			unsigned int milliseconds = (timestamp) % 1000;
@@ -516,33 +531,6 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			framenumber++;
 			myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(decodedtxt.c_str()) << "\n\n";
 
-
-			input_thread_t *p_input_thread = p_owner->p_input;
-			/*
-			//libvlc_time_t i_time;
-			if (p_input_thread)
-			{
-				// load filter file
-				if (!FilterFileLoaded)
-				{
-					LoadFilterFile();
-				}
-				// parsing code from C#
-				vlc_object_hold(p_input_thread);
-				// read time
-				timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
-				unsigned int milliseconds = (timestamp) % 1000;
-				unsigned int seconds = (((timestamp)-milliseconds) / 1000) % 60;
-				unsigned int minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
-				unsigned int hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-				n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-
-				myfile << "timvar: " << starttime << "\n";
-				// set new time
-				var_SetInteger(p_input_thread, "time", to_mtime(timestamp + 10000));
-				vlc_object_release(p_input_thread);
-			}
-			*/
 			myfile.close();
 		}
 	}
@@ -553,6 +541,39 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 	}
 
 	free(spu_data.p_data);
+
+	// NOTE.. this should not be in spudec... need to move at some point, but, for initial debug/enabling
+	if (ConfigOptionMap[L"VideoFilterEnabled"])
+	{
+		ofstream myfile;
+		input_thread_t *p_input_thread = p_owner->p_input;
+		libvlc_time_t timestamp, n;
+		char starttime[SRT_BUF_SIZE];
+		if (p_input_thread)
+		{
+			// load filter file
+			if (!FilterFileLoaded)
+			{
+				LoadFilterFile();
+			}
+			// parsing code from C#
+			vlc_object_hold(p_input_thread);
+			// read time
+			timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
+			// convert to srt format for debug write to file
+			unsigned int milliseconds = (timestamp) % 1000;
+			unsigned int seconds = (((timestamp)-milliseconds) / 1000) % 60;
+			unsigned int minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
+			unsigned int hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+			n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+
+			myfile << "timvar: " << starttime << "\n";
+			// set new time
+			var_SetInteger(p_input_thread, "time", to_mtime(timestamp + 10000));
+			vlc_object_release(p_input_thread);
+		}
+		
+	}
 
 	return p_spu;
 }
