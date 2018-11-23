@@ -347,18 +347,34 @@ static bool ParseForWords(std::wstring sentence)
 }
 
 #define SRT_BUF_SIZE 50
-static void vlctime_to_srttime(char *srtbuf, libvlc_time_t itime)
+static char srttimebuf[SRT_BUF_SIZE];
+static char * vlctime_to_srttime(libvlc_time_t itime)
 {
 	libvlc_time_t n;
 	unsigned int milliseconds = (itime) % 1000;
 	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
 	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
 	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s((char(&)[SRT_BUF_SIZE])srtbuf, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+	n = sprintf_s(srttimebuf, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+	return srttimebuf;
 }
 
-static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srtbuf)
+static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srttime)
 {
+	// format of srttime is:  hh:mm:ss,ms. <== 3 digits of ms
+	// might be a better way of doing this... but, for now... just change : and , to space to help with parsing
+	srttime[2] = ' ';
+	srttime[5] = ' ';
+	srttime[8] = ' ';
+	std::wstringstream iss(srttime);
+	unsigned int hours;
+	unsigned int minutes;
+	unsigned int seconds;
+	unsigned int milliseconds;
+	if (!(iss >> hours >> minutes >> seconds >> milliseconds)) { return; } // error
+	// stuff below doing reverse of calculations in vlctime_to_srttime
+	itime = (((((hours * 60) + minutes) * 60) + seconds) * 1000) + milliseconds;
+
 }
 
 typedef struct
@@ -384,7 +400,7 @@ static void LoadFilterFile()
 	{
 		if ((cmdline == L"mute") || (cmdline == L"skip"))
 		{
-			// next getline gets srt start time, ignoring the ms
+			// next getline gets srt start time
 			std::getline(infile, srttime, L' ');
 			// process start time
 			srttime_to_vlctime(starttime, srttime);
@@ -501,53 +517,39 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			libvlc_time_t basestartdelay = 0;
 			libvlc_time_t duration = 0;
 
+			// TODO:  might want to add a safe-mode here, where it will still mute when ocr fail to detect any text
+			//   This situation can occur either because OCR failed to detect any text or when it detects text incorrectly
+			//   In the meantime, can put "No Text Detected" in the filter word file to handle case where it fails to detect any text
+			//   seems decoder has particular issues with words 4 letters or less, i've seen problems on multiple dvds
 			if (ParseForWords(decodedtxt) == TRUE)
 			{
-				// Not sure which delays and timestamps are the correct ones to use for this calculation, but, this seems to work
-				// Also not entirely sure if the extra i_buffering_duration delay is necessary (pts delay does seem necessary), but it seems to help with lining up the mute with the subtitle
-				// I've some cases where it mutes a bit late or unmutes a bit early... not sure what causes this
-				// Todo:  Are these reliable times?
-				// i've run into cases where i_stream was greater than i_start, not sure why, but for now, only set startdelay if i_stream <= i_start
-				//   leaving basestart delay to be 0 otherwise... not sure if this is right way to handle this
-				if (p_owner->p_clock->last.i_stream <= p_spu->i_start)
-				{
-					basestartdelay = from_mtime(p_spu->i_start - p_owner->p_clock->last.i_stream);
-				}
-				startdelay = basestartdelay + from_mtime(p_owner->p_clock->i_buffering_duration) + from_mtime(p_owner->p_clock->i_pts_delay);
+				mtime_t getdateresult = decoder_GetDisplayDate(p_dec, p_spu->i_start);
+				mtime_t getcurrentdate = mdate();
+				mtime_t datediff = getdateresult - getcurrentdate;
 				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
 				// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
 				//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
 				// for debug... 
 				//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-				//myfile << "Calling mute... start: " << p_spu->i_start << " stop: " << p_spu->i_stop << " istream: " << p_owner->p_clock->last.i_stream << " ipts: " << p_sys->i_pts << " buffer duration: " << buffer_duration << " tsdelay: " << p_owner->i_ts_delay << " ptsdelay: " << p_owner->p_clock->i_pts_delay << "\n";
+				//myfile << "Calling mute... start: " << p_spu->i_start << " stop: " << p_spu->i_stop << " istream: " << p_owner->p_clock->last.i_stream << " ipts: " << p_sys->i_pts << " buffer duration: " << p_owner->p_clock->i_buffering_duration << " tsdelay: " << p_owner->i_ts_delay << " ptsdelay: " << p_owner->p_clock->i_pts_delay << " mdate: " << getcurrentdate << " getdateresult: " << getdateresult << " datediff: " << datediff << " startdelay: " << startdelay << "\n";
 				//myfile << "i_start: " << from_mtime(p_spu->i_start) << " last.i_stream: " << from_mtime(p_owner->p_clock->last.i_stream) << "\n";
-				// need to look into using i_pts_delay.... seems this is a factor in delay and changes, potentially from play to play
 				//myfile.close();
-				DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
+				//DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
+				DoMute(from_mtime(datediff), duration, input_resource_HoldAout(p_owner->p_resource));
 			}
 		}
 		if (DumpTextToFileEnabled)
 		{
 			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 			libvlc_time_t timestamp, n;
-			char starttime[SRT_BUF_SIZE];
-			char endtime[SRT_BUF_SIZE];
+			char * starttime;
+			char * endtime;
 
 			timestamp = from_mtime(p_spu->i_start);
-			//broken!!!... vlctime_to_srttime(starttime, timestamp);
-			unsigned int milliseconds = (timestamp) % 1000;
-			unsigned int seconds = (((timestamp)-milliseconds) / 1000) % 60;
-			unsigned int minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
-			unsigned int hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-			n = sprintf_s(starttime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+			starttime = vlctime_to_srttime(timestamp);
 
 			timestamp = from_mtime(p_spu->i_stop);
-			//broken!!!... vlctime_to_srttime(endtime, timestamp);
-			milliseconds = (timestamp) % 1000;
-			seconds = (((timestamp)-milliseconds) / 1000) % 60;
-			minutes = (((((timestamp)-milliseconds) / 1000) - seconds) / 60) % 60;
-			hours = ((((((timestamp)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-			n = sprintf_s(endtime, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+			endtime = vlctime_to_srttime(timestamp);
 
 			framenumber++;
 			myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(decodedtxt.c_str()) << "\n\n";
@@ -569,7 +571,7 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		ofstream myfile;
 		input_thread_t *p_input_thread = p_owner->p_input;
 		libvlc_time_t timestamp, n;
-		char starttime[SRT_BUF_SIZE];
+		char * starttime;
 		// load filter file
 		if (!FilterFileLoaded)
 		{
@@ -587,7 +589,7 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			// for debug only....
 			// convert to srt format for debug write to file
 			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-			// broken!!!... vlctime_to_srttime(starttime, timestamp);
+			starttime = vlctime_to_srttime(timestamp);
 			myfile << "timvar: " << starttime << "\n";
 			myfile.close();
 			// end debug...
