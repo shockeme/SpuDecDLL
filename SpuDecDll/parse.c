@@ -50,69 +50,8 @@ using namespace std;
 #include <vlc_atomic.h>
 #include <vlc_input.h> /* FIXME Needed for input_clock_t */
 
-typedef struct
-{
-	mtime_t i_stream;
-	mtime_t i_system;
-} clock_point_t;
-typedef struct
-{
-	mtime_t i_value;
-	int     i_residue;
 
-	int     i_count;
-	int     i_divider;
-} average_t;
-#define INPUT_CLOCK_LATE_COUNT (3)
 
-// taken from src\input\clock.c
-struct input_clock_t
-{
-	/* */
-	vlc_mutex_t lock;
-
-	/* Last point
-	 * It is used to detect unexpected stream discontinuities */
-	clock_point_t last;
-
-	/* Maximal timestamp returned by input_clock_ConvertTS (in system unit) */
-	mtime_t i_ts_max;
-
-	/* Amount of extra buffering expressed in stream clock */
-	mtime_t i_buffering_duration;
-
-	/* Clock drift */
-	mtime_t i_next_drift_update;
-	average_t drift;
-
-	/* Late statistics */
-	struct
-	{
-		mtime_t  pi_value[INPUT_CLOCK_LATE_COUNT];
-		unsigned i_index;
-	} late;
-
-	/* Reference point */
-	clock_point_t ref;
-	bool          b_has_reference;
-
-	/* External clock drift */
-	mtime_t       i_external_clock;
-	bool          b_has_external_clock;
-
-	/* Current modifiers */
-	bool    b_paused;
-	int     i_rate;
-	mtime_t i_pts_delay;
-	mtime_t i_pause_date;
-};
-
-/** @struct input_clock_t
- * This structure is used to manage clock drift and reception jitters
- *
- * XXX input_clock_GetTS can be called from any threads. All others functions
- * MUST be called from one and only one thread.
- */
 typedef struct input_clock_t input_clock_t;
 
 // Taken from src\input\decoder.c
@@ -347,9 +286,9 @@ static bool ParseForWords(std::wstring sentence)
 }
 
 #define SRT_BUF_SIZE 50
-static char srttimebuf[SRT_BUF_SIZE];
 static char * vlctime_to_srttime(libvlc_time_t itime)
 {
+	static char srttimebuf[SRT_BUF_SIZE];
 	libvlc_time_t n;
 	unsigned int milliseconds = (itime) % 1000;
 	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
@@ -395,6 +334,10 @@ static void LoadFilterFile()
 	libvlc_time_t starttime;
 	libvlc_time_t endtime;
 
+	// there's probably a better way to parse this...
+	// first line is chapter num?  Is this only line formatted like this?
+	// can ignore the result of this getline
+	std::getline(infile, cmdline);
 	// first getline gets command (mute/skip)
 	while (std::getline(infile, cmdline, L';'))
 	{
@@ -416,9 +359,16 @@ static void LoadFilterFile()
 		}
 	}
 	FilterFileLoaded = 1;
-
-	// Now what???
-	// need to figure out how to process the file during movie playback
+	
+	// debug dump of array... 
+	//ofstream myfile;
+	//myfile.open("RawFilterOutput.txt", ofstream::out);
+	//myfile << "dumping array...\n";
+	//for (int i = 0; i < FilterFileArray.size(); i++)
+	//{
+	//	myfile << FromWide(FilterFileArray[i].FilterType.c_str()) << ", " << FilterFileArray[i].starttime << ", " << FilterFileArray[i].endtime << "\n";
+	//}
+	//myfile.close();
 }
 
 // helper function for string comparison
@@ -513,8 +463,6 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		toLower(decodedtxt);
 		if (FilterOnTheFlyEnabled)
 		{
-			libvlc_time_t startdelay = 0;
-			libvlc_time_t basestartdelay = 0;
 			libvlc_time_t duration = 0;
 
 			// TODO:  might want to add a safe-mode here, where it will still mute when ocr fail to detect any text
@@ -530,10 +478,13 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 				// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
 				//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
 				// for debug... 
+				//input_thread_t *p_input_thread = p_owner->p_input;
 				//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-				//myfile << "Calling mute... start: " << p_spu->i_start << " stop: " << p_spu->i_stop << " istream: " << p_owner->p_clock->last.i_stream << " ipts: " << p_sys->i_pts << " buffer duration: " << p_owner->p_clock->i_buffering_duration << " tsdelay: " << p_owner->i_ts_delay << " ptsdelay: " << p_owner->p_clock->i_pts_delay << " mdate: " << getcurrentdate << " getdateresult: " << getdateresult << " datediff: " << datediff << " startdelay: " << startdelay << "\n";
-				//myfile << "i_start: " << from_mtime(p_spu->i_start) << " last.i_stream: " << from_mtime(p_owner->p_clock->last.i_stream) << "\n";
+				//vlc_object_hold(p_input_thread);
+				//myfile << "Calling mute... start: " << p_spu->i_start << " stop: " << p_spu->i_stop << " ipts: " << p_sys->i_pts << " mdate: " << getcurrentdate << " getdateresult: " << getdateresult << " datediff: " << datediff << " time var: " << var_GetInteger(p_input_thread, "time") << "\n";
+				//vlc_object_release(p_input_thread);
 				//myfile.close();
+
 				//DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
 				DoMute(from_mtime(datediff), duration, input_resource_HoldAout(p_owner->p_resource));
 			}
@@ -578,27 +529,35 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 			LoadFilterFile();
 		}
 
-		// need to figure out how to take action when movie time hits the start time in one of the entries in FilterFileArray
-		// if (FilterFileArray[x].starttime ~= p_owner->p_clock->last.i_stream) then take action and stop at end time
+		// need to spawn another thread to loop on this somehow...
 		if (p_input_thread)
 		{
-			// here's how to read current time, and to set new time if command was a 'skip'
+			// NOTE:  This 'time' var doesn't seem to line up with the start/stop values of mute, not sure how these time values relate to filterfile values right now
+			// here's how to read current time
 			vlc_object_hold(p_input_thread);
-			// read time
 			timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
-			// for debug only....
-			// convert to srt format for debug write to file
-			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-			starttime = vlctime_to_srttime(timestamp);
-			myfile << "timvar: " << starttime << "\n";
-			myfile.close();
-			// end debug...
-
-			// set new time (should be set to end time, FilterFileArray[x].endtime)
-			var_SetInteger(p_input_thread, "time", to_mtime(timestamp + 10000));
 			vlc_object_release(p_input_thread);
+
+			// look for entry that timestamp is greater than start time and less than end time
+			for (int i=0; i < FilterFileArray.size(); i++)
+			{
+				if ((timestamp > FilterFileArray[i].starttime) && (timestamp < FilterFileArray[i].endtime))
+				{
+					if (FilterFileArray[i].FilterType == L"skip")
+					{
+						// set new time 
+						vlc_object_hold(p_input_thread);
+						var_SetInteger(p_input_thread, "time", to_mtime(FilterFileArray[i].endtime));
+						vlc_object_release(p_input_thread);
+
+						// should check for next event in array and wait until that time?
+
+						break; // out of the for loop
+					}
+					// else if "mute"?
+				}
+			}
 		}
-		
 	}
 
 	return p_spu;
