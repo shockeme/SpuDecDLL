@@ -92,4 +92,4 @@ typedef struct
 	int i_y;
 } spu_properties_t;
 wchar_t * OcrDecodeText(subpicture_data_t * SubImageData, spu_properties_t * SpuProp);
-void DoMute(int64_t startmute, int64_t Duration, audio_output_t *p_aout);
+void DoMute(int64_t startmute, int64_t Duration, audio_output_t *p_aout, bool waitformute);

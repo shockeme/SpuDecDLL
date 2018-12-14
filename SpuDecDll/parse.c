@@ -391,8 +391,95 @@ int framenumber=0;
 static int WordListLoaded = 0;
 static int ConfigFileLoaded = 0;
 
+static decoder_t * spudec_p_dec; // make copy of decoder for parse filters; todo: find better way to do this
+void * ParseFilters(void * input_data)
+{
+//	decoder_owner_sys_t *p_owner = (decoder_owner_sys_t *)input_data;
+	decoder_owner_sys_t *p_owner;
+	input_thread_t *p_input_thread = spudec_p_dec->p_owner->p_input;
+	libvlc_time_t timestamp;
+	mtime_t mdateval;
+	mtime_t inputtimeval;
+	libvlc_time_t duration;
+	ofstream myfile;
+
+	// do this loop forever... 
+	// todo:  well, should be executed while main movie event is playing, can optimize later
+	while (1)
+	{
+		// get updated copy of ptrs; todo:  fix this, need updated ptr else mute doesn't work
+		//p_owner = spudec_p_dec->p_owner; 
+
+		// only do below if ptr is valid
+		if (p_input_thread)
+		{
+			// NOTE:  This 'time' var doesn't seem to line up with the start/stop values of mute, not sure how these time values relate to filterfile values right now
+			vlc_object_hold(p_input_thread);
+			timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
+			vlc_object_release(p_input_thread);
+
+			// Todo: optimize this scheme, better to periodically check?  or to put in wait until specific time based
+			//  on filter times?
+			// current method here is to just periodically check, will always wait ~100ms between each check.
+			// look for entry that timestamp is greater than start time and less than end time
+			for (int i = 0; i < FilterFileArray.size(); i++)
+			{
+				if ((timestamp > FilterFileArray[i].starttime) && (timestamp < FilterFileArray[i].endtime))
+				{
+					// debug
+					//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+					//myfile << "ParseFilters: Detected match. timestamp: " << timestamp << " start: " << FilterFileArray[i].starttime << " end: " << FilterFileArray[i].endtime << "\n";
+					//myfile.close();
+					if (FilterFileArray[i].FilterType == L"skip")
+					{
+						// debug message
+						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+						//myfile << "ParseFilters: Skipping video...\n";
+						//myfile.close();
+						// set new time 
+						vlc_object_hold(p_input_thread);
+						var_SetInteger(p_input_thread, "time", to_mtime(FilterFileArray[i].endtime + 300)); // todo:  fixme... need to add ~300ms to make sure new time doesn't fall into this same window, it seems not precise
+						vlc_object_release(p_input_thread);
+						break; // out of the for loop
+					}
+					// else if "mute"
+					// TODO:  fix... muting is broken, seems domute function breaks, maybe bad ptrs
+					/*
+					if (FilterFileArray[i].FilterType == L"mute")
+					{
+						duration = FilterFileArray[i].endtime - FilterFileArray[i].starttime;
+						// debug message
+						myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+						myfile << "ParseFilters: Muting audio... duration: " << duration << "\n";
+						myfile.close();
+						// mute
+						if (p_owner->p_resource)
+						{
+							myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+							myfile << "ParseFilters: resource valid \n";
+							myfile.close();
+							DoMute(10, duration, input_resource_HoldAout(p_owner->p_resource), true);
+						}
+						//msleep(to_mtime(duration * 1000)); // todo:  find better way to handle this, but for now, sleep while muting
+						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+						//myfile << "ParseFilters: done sleeping...\n ";
+						//myfile.close();
+						break; // out of the for loop
+					}
+					*/
+				}
+			}
+		}
+		// wait for ~100ms (msleep uses usec)
+		msleep(100000);
+	}
+
+	return nullptr;
+}
+
 subpicture_t * ParsePacket(decoder_t *p_dec)
 {
+	spudec_p_dec = p_dec; // make copy of decoder for parse filters above; todo: find better way to do this
 	decoder_sys_t *p_sys = p_dec->p_sys;
 	subpicture_t *p_spu;
 	subpicture_data_t spu_data;
@@ -486,7 +573,7 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 				//myfile.close();
 
 				//DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
-				DoMute(from_mtime(datediff), duration, input_resource_HoldAout(p_owner->p_resource));
+				DoMute(from_mtime(datediff), duration, input_resource_HoldAout(p_owner->p_resource), false);
 			}
 		}
 		if (DumpTextToFileEnabled)
@@ -520,42 +607,18 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 	if (ConfigOptionMap[L"VideoFilterEnabled"])
 	{
 		ofstream myfile;
-		input_thread_t *p_input_thread = p_owner->p_input;
 		libvlc_time_t timestamp, n;
+		vlc_thread_t newthread;
 		char * starttime;
 		// load filter file
 		if (!FilterFileLoaded)
 		{
 			LoadFilterFile();
-		}
-
-		// need to spawn another thread to loop on this somehow...
-		if (p_input_thread)
-		{
-			// NOTE:  This 'time' var doesn't seem to line up with the start/stop values of mute, not sure how these time values relate to filterfile values right now
-			// here's how to read current time
-			vlc_object_hold(p_input_thread);
-			timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
-			vlc_object_release(p_input_thread);
-
-			// look for entry that timestamp is greater than start time and less than end time
-			for (int i=0; i < FilterFileArray.size(); i++)
+			// need to spawn another thread to loop on executing the filters
+			if (vlc_clone(&newthread, &ParseFilters, (void *)p_owner, 0) != 0)
 			{
-				if ((timestamp > FilterFileArray[i].starttime) && (timestamp < FilterFileArray[i].endtime))
-				{
-					if (FilterFileArray[i].FilterType == L"skip")
-					{
-						// set new time 
-						vlc_object_hold(p_input_thread);
-						var_SetInteger(p_input_thread, "time", to_mtime(FilterFileArray[i].endtime));
-						vlc_object_release(p_input_thread);
-
-						// should check for next event in array and wait until that time?
-
-						break; // out of the for loop
-					}
-					// else if "mute"?
-				}
+				//error, exit(?)
+				msg_Err(p_dec, "Failed to spawn filter thread.");
 			}
 		}
 	}
