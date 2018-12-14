@@ -391,26 +391,22 @@ int framenumber=0;
 static int WordListLoaded = 0;
 static int ConfigFileLoaded = 0;
 
-static decoder_t * spudec_p_dec; // make copy of decoder for parse filters; todo: find better way to do this
 void * ParseFilters(void * input_data)
 {
-//	decoder_owner_sys_t *p_owner = (decoder_owner_sys_t *)input_data;
-	decoder_owner_sys_t *p_owner;
-	input_thread_t *p_input_thread = spudec_p_dec->p_owner->p_input;
+	decoder_owner_sys_t *p_owner = (decoder_owner_sys_t *)input_data;
+	input_thread_t *p_input_thread = p_owner->p_input;
 	libvlc_time_t timestamp;
 	mtime_t mdateval;
 	mtime_t inputtimeval;
 	libvlc_time_t duration;
 	ofstream myfile;
+	audio_output_t *p_aout;
 
 	// do this loop forever... 
 	// todo:  well, should be executed while main movie event is playing, can optimize later
 	while (1)
 	{
-		// get updated copy of ptrs; todo:  fix this, need updated ptr else mute doesn't work
-		//p_owner = spudec_p_dec->p_owner; 
-
-		// only do below if ptr is valid
+		// only do below if ptr is valid; assuming this ptr stays valid for duration of movie playing...
 		if (p_input_thread)
 		{
 			// NOTE:  This 'time' var doesn't seem to line up with the start/stop values of mute, not sure how these time values relate to filterfile values right now
@@ -441,24 +437,20 @@ void * ParseFilters(void * input_data)
 						var_SetInteger(p_input_thread, "time", to_mtime(FilterFileArray[i].endtime + 300)); // todo:  fixme... need to add ~300ms to make sure new time doesn't fall into this same window, it seems not precise
 						vlc_object_release(p_input_thread);
 						break; // out of the for loop
-					}
-					// else if "mute"
+					} 
 					// TODO:  fix... muting is broken, seems domute function breaks, maybe bad ptrs
-					/*
-					if (FilterFileArray[i].FilterType == L"mute")
+					else if (FilterFileArray[i].FilterType == L"mute")
 					{
 						duration = FilterFileArray[i].endtime - FilterFileArray[i].starttime;
 						// debug message
-						myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-						myfile << "ParseFilters: Muting audio... duration: " << duration << "\n";
-						myfile.close();
+						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
+						//myfile << "ParseFilters: Muting audio... duration: " << duration << "\n";
+						//myfile.close();
 						// mute
-						if (p_owner->p_resource)
+						// get aout, return 0 means successful
+						if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
 						{
-							myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-							myfile << "ParseFilters: resource valid \n";
-							myfile.close();
-							DoMute(10, duration, input_resource_HoldAout(p_owner->p_resource), true);
+							DoMute(1, duration, p_aout, true);
 						}
 						//msleep(to_mtime(duration * 1000)); // todo:  find better way to handle this, but for now, sleep while muting
 						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
@@ -466,7 +458,7 @@ void * ParseFilters(void * input_data)
 						//myfile.close();
 						break; // out of the for loop
 					}
-					*/
+					
 				}
 			}
 		}
@@ -479,7 +471,6 @@ void * ParseFilters(void * input_data)
 
 subpicture_t * ParsePacket(decoder_t *p_dec)
 {
-	spudec_p_dec = p_dec; // make copy of decoder for parse filters above; todo: find better way to do this
 	decoder_sys_t *p_sys = p_dec->p_sys;
 	subpicture_t *p_spu;
 	subpicture_data_t spu_data;
@@ -572,7 +563,6 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 				//vlc_object_release(p_input_thread);
 				//myfile.close();
 
-				//DoMute(startdelay, duration, input_resource_HoldAout(p_owner->p_resource));
 				DoMute(from_mtime(datediff), duration, input_resource_HoldAout(p_owner->p_resource), false);
 			}
 		}
