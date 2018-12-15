@@ -233,6 +233,7 @@ static void LoadWords()
 // RenderEnable 1
 // DumpTextToFileEnabled 0
 // FilterOnTheFlyEnabled 1
+// VideoFilterEnabled 0
 //
 // this means that RenderEnable is true (=1), DumpTextToFileEnabled = false (=0), and FilterOnTheFlyEnabled = true (=1)
 static void LoadConfig()
@@ -259,6 +260,7 @@ static void LoadConfig()
 	FilterOnTheFlyEnabled = ConfigOptionMap[L"FilterOnTheFlyEnabled"];
 }
 
+// This will return true if it matches a badword in sentence
 static bool ParseForWords(std::wstring sentence)
 {
 	size_t i;
@@ -286,16 +288,16 @@ static bool ParseForWords(std::wstring sentence)
 }
 
 #define SRT_BUF_SIZE 50
-static char * vlctime_to_srttime(libvlc_time_t itime)
+// note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
+void vlctime_to_srttime(char srttimebuf[SRT_BUF_SIZE], libvlc_time_t itime)
 {
-	static char srttimebuf[SRT_BUF_SIZE];
+	//static char srttimebuf[SRT_BUF_SIZE];
 	libvlc_time_t n;
 	unsigned int milliseconds = (itime) % 1000;
 	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
 	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
 	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s(srttimebuf, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-	return srttimebuf;
+	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 }
 
 static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srttime)
@@ -324,6 +326,7 @@ typedef struct
 } FilterFileEntry;
 std::vector<FilterFileEntry> FilterFileArray;
 
+// This routine currently hardcoded to load file named:  FilterFile.txt
 static int FilterFileLoaded = 0;
 static void LoadFilterFile()
 {
@@ -391,6 +394,7 @@ int framenumber=0;
 static int WordListLoaded = 0;
 static int ConfigFileLoaded = 0;
 
+// Will execute the filters loaded in FilterFile.txt at the appropriate time
 void * ParseFilters(void * input_data)
 {
 	decoder_owner_sys_t *p_owner = (decoder_owner_sys_t *)input_data;
@@ -570,14 +574,14 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		{
 			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 			libvlc_time_t timestamp, n;
-			char * starttime;
-			char * endtime;
+			char starttime[SRT_BUF_SIZE];
+			char endtime[SRT_BUF_SIZE];
 
 			timestamp = from_mtime(p_spu->i_start);
-			starttime = vlctime_to_srttime(timestamp);
+			vlctime_to_srttime(starttime, timestamp);
 
 			timestamp = from_mtime(p_spu->i_stop);
-			endtime = vlctime_to_srttime(timestamp);
+			vlctime_to_srttime(endtime, timestamp);
 
 			framenumber++;
 			myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(decodedtxt.c_str()) << "\n\n";
