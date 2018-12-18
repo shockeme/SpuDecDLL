@@ -1,3 +1,4 @@
-RenderEnable 0
-DumpTextToFileEnabled 1
-FilterOnTheFlyEnabled 1
+RenderEnable 1
+DumpTextToFileEnabled 0
+FilterOnTheFlyEnabled 0
+VideoFilterEnabled 0
