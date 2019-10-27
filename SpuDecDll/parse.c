@@ -33,119 +33,17 @@
 # include "config.h"
 #endif
 
-#include "spudec.h"
-#include "..\libvlc.h"  // this is in 1 level above the plugins include area; could change include paths for this
-#include <vlc_common.h>
-#include <vlc_aout.h>
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <vector>
 #include <wctype.h>
-#include <map>
 using namespace std;
 
-// This stuff is included to give us visibility into private structures that we'll use to help with getting time & muting
-#include <vlc_atomic.h>
-#include <vlc_input.h> /* FIXME Needed for input_clock_t */
+#include "spudec.h"
 
-
-
-typedef struct input_clock_t input_clock_t;
-
-// Taken from src\input\decoder.c
-struct decoder_owner_sys_t
-{
-	input_thread_t  *p_input;
-	input_resource_t*p_resource;
-	input_clock_t   *p_clock;
-	int             i_last_rate;
-
-	vout_thread_t   *p_spu_vout;
-	int              i_spu_channel;
-	int64_t          i_spu_order;
-
-	sout_instance_t         *p_sout;
-	sout_packetizer_input_t *p_sout_input;
-
-	vlc_thread_t     thread;
-
-	void(*pf_update_stat)(decoder_owner_sys_t *, unsigned decoded, unsigned lost);
-
-	/* Some decoders require already packetized data (ie. not truncated) */
-	decoder_t *p_packetizer;
-	bool b_packetizer;
-
-	/* Current format in use by the output */
-	es_format_t    fmt;
-
-	/* */
-	bool           b_fmt_description;
-	vlc_meta_t     *p_description;
-	atomic_int     reload;
-
-	/* fifo */
-	block_fifo_t *p_fifo;
-
-	/* Lock for communication with decoder thread */
-	vlc_mutex_t lock;
-	vlc_cond_t  wait_request;
-	vlc_cond_t  wait_acknowledge;
-	vlc_cond_t  wait_fifo; /* TODO: merge with wait_acknowledge */
-	vlc_cond_t  wait_timed;
-
-	/* -- These variables need locking on write(only) -- */
-	audio_output_t *p_aout;
-
-	vout_thread_t   *p_vout;
-
-	/* -- Theses variables need locking on read *and* write -- */
-	/* Preroll */
-	int64_t i_preroll_end;
-	/* Pause */
-	mtime_t pause_date;
-	unsigned frames_countdown;
-	bool paused;
-
-	bool error;
-
-	/* Waiting */
-	bool b_waiting;
-	bool b_first;
-	bool b_has_data;
-
-	/* Flushing */
-	bool flushing;
-	bool b_draining;
-	atomic_bool drained;
-	bool b_idle;
-
-	/* CC */
-#define MAX_CC_DECODERS 64 /* The es_out only creates one type of es */
-	struct
-	{
-		bool b_supported;
-		decoder_cc_desc_t desc;
-		decoder_t *pp_decoder[MAX_CC_DECODERS];
-	} cc;
-
-	/* Delay */
-	mtime_t i_ts_delay;
-};
-
-/// END stuff needed for visibility into private structures
-
-// note... these copied from libvlc_internal.h
-static inline libvlc_time_t from_mtime(mtime_t time)
-{
-	return (time + 500ULL) / 1000ULL;
-}
-
-static inline mtime_t to_mtime(libvlc_time_t time)
-{
-	return time * 1000ULL;
-}
+//#include "..\libvlc.h"  // this is in 1 level above the plugins include area; could change include paths for this
+#include <vlc_common.h>
 
 
 /*****************************************************************************
@@ -160,7 +58,6 @@ static int  ParseRLE(decoder_t *, subpicture_data_t *,
 	const spu_properties_t *);
 static void Render(decoder_t *, subpicture_t *, subpicture_data_t *,
 	const spu_properties_t *);
-static bool ParseForWords(std::wstring sentence);
 
 /*****************************************************************************
 * AddNibble: read a nibble from a source packet and add it to our integer.
@@ -178,202 +75,13 @@ static inline unsigned int AddNibble(unsigned int i_code,
 	}
 }
 
+
 /*****************************************************************************
-* ParseForWords: parse sentence and return TRUE if a cuss word is found
-* TODO: need to get a text file parsed at the start of the movie and then store 
-* the words into an array for this function
+* ParsePacket: parse an SPU packet and send it to the video output
+*****************************************************************************
+* This function parses the SPU packet and, if valid, sends it to the
+* video output.
 *****************************************************************************/
-std::vector<std::wstring> badwords;
-static std::map<std::wstring, int> ConfigOptionMap;
-// default values now defined in map; may eventually remove these vars if map is used instead
-static int RenderEnable;
-static int DumpTextToFileEnabled;
-static int FilterOnTheFlyEnabled;
-
-// This expects words to be listed 1 on each line with or without wildcard.  With no wildcards, then it will only match on the exact word
-// example contents for filter_words.txt:
-//  badword_a
-//  *badword_b
-//  badword_c*
-//  *badword_d*
-static void LoadWords()
-{
-	// Todo:  change input file format, or somehow obfuscate the contents
-	std::wifstream infile("filter_words.txt");
-	std::wstring line;
-	while (std::getline(infile, line))
-	{
-		// todo:  should also check if string is not empty but has only white space, and ignore that line...
-		if (!line.empty())
-		{
-			// each string from subtitle will be parsed and space will be inserted for every non alpha character in the string so we can reliably filter on specific words
-			// here we will default to adding space at front/end of word so we match on the exact word
-			// however, if first or last char is *, then don't put space at front/end; else put space at front/end so we only search this word
-			wstring FirstChar = L" ";
-			wstring LastChar = L" ";
-			if (line.front() == L'*')
-			{
-				line.erase(0, 1);
-				FirstChar = L"";
-			}
-			if (line.back() == L'*')
-			{
-				line.pop_back();
-				LastChar = L"";
-			}
-			badwords.push_back(FirstChar + line + LastChar);
-		}
-	}
-}
-
-// QUESTION:  Should we merge with bad word file?  Just have 1 file that has the options & words to filter?
-// text file = config.txt put in the same directory as the vlc.exe file. 
-// the format is very simple where each line represents the setting
-// config.txt:
-// RenderEnable 1
-// DumpTextToFileEnabled 0
-// FilterOnTheFlyEnabled 1
-// VideoFilterEnabled 0
-//
-// this means that RenderEnable is true (=1), DumpTextToFileEnabled = false (=0), and FilterOnTheFlyEnabled = true (=1)
-static void LoadConfig()
-{
-	std::wifstream infile("config.txt");
-	std::wstring line;
-	// init some default values, since these will be used
-	ConfigOptionMap[L"RenderEnable"] = 1;
-	ConfigOptionMap[L"DumpTextToFileEnabled"] = 1;
-	ConfigOptionMap[L"FilterOnTheFlyEnabled"] = 1;
-	ConfigOptionMap[L"VideoFilterEnabled"] = 0;
-
-	while (std::getline(infile, line))
-	{
-		std::wstringstream iss(line);
-		int ConfigValue;
-		std::wstring ConfigOption;
-		if (!(iss >> ConfigOption >> ConfigValue)) { break; } // error
-		ConfigOptionMap[ConfigOption] = ConfigValue;
-	}
-	// can change to just use the map directly in other functions, rather than assigning to these vars
-	RenderEnable = ConfigOptionMap[L"RenderEnable"];
-	DumpTextToFileEnabled = ConfigOptionMap[L"DumpTextToFileEnabled"];
-	FilterOnTheFlyEnabled = ConfigOptionMap[L"FilterOnTheFlyEnabled"];
-}
-
-// This will return true if it matches a badword in sentence
-static bool ParseForWords(std::wstring sentence)
-{
-	size_t i;
-	size_t sentenceindx;
-	for (i = 0; i < badwords.size(); i++)
-	{
-		// replace all non alpha characters, including start & end of line with space
-		// todo: is this OK?  it's replacing all non letters, including ', which will split contractions.
-		// debug... seems this is failing on a string that doesn't decode properly;  Not sure if we can solve decode problem, but this shouldn't fail
-		for (sentenceindx = 0; sentenceindx < sentence.size(); sentenceindx++)
-		{
-			if (!iswalpha(sentence[sentenceindx]))
-			{
-				sentence[sentenceindx] = ' ';
-			}
-		}
-		sentence.insert(0, 1, L' ');
-		sentence.push_back(L' ');
-		if (sentence.find(badwords[i]) != string::npos)
-		{
-			return TRUE;
-		}
-	}
-	return FALSE;
-}
-
-#define SRT_BUF_SIZE 50
-// note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
-void vlctime_to_srttime(char srttimebuf[SRT_BUF_SIZE], libvlc_time_t itime)
-{
-	//static char srttimebuf[SRT_BUF_SIZE];
-	libvlc_time_t n;
-	unsigned int milliseconds = (itime) % 1000;
-	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
-	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
-	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-}
-
-static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srttime)
-{
-	// format of srttime is:  hh:mm:ss,ms. <== 3 digits of ms
-	// might be a better way of doing this... but, for now... just change : and , to space to help with parsing
-	srttime[2] = ' ';
-	srttime[5] = ' ';
-	srttime[8] = ' ';
-	std::wstringstream iss(srttime);
-	unsigned int hours;
-	unsigned int minutes;
-	unsigned int seconds;
-	unsigned int milliseconds;
-	if (!(iss >> hours >> minutes >> seconds >> milliseconds)) { return; } // error
-	// stuff below doing reverse of calculations in vlctime_to_srttime
-	itime = (((((hours * 60) + minutes) * 60) + seconds) * 1000) + milliseconds;
-
-}
-
-typedef struct
-{
-	wstring FilterType;
-	libvlc_time_t starttime;
-	libvlc_time_t endtime;
-} FilterFileEntry;
-std::vector<FilterFileEntry> FilterFileArray;
-
-// This routine currently hardcoded to load file named:  FilterFile.txt
-static int FilterFileLoaded = 0;
-static void LoadFilterFile()
-{
-	std::vector<std::wstring> filterfile;
-	std::wifstream infile("FilterFile.txt"); // How do we allow user to provide input to determine filter file name??
-	std::wstring cmdline;
-	std::wstring srttime;
-	libvlc_time_t starttime;
-	libvlc_time_t endtime;
-
-	// there's probably a better way to parse this...
-	// first line is chapter num?  Is this only line formatted like this?
-	// can ignore the result of this getline
-	std::getline(infile, cmdline);
-	// first getline gets command (mute/skip)
-	while (std::getline(infile, cmdline, L';'))
-	{
-		if ((cmdline == L"mute") || (cmdline == L"skip"))
-		{
-			// next getline gets srt start time
-			std::getline(infile, srttime, L' ');
-			// process start time
-			srttime_to_vlctime(starttime, srttime);
-
-			// get & throw away intermediate content on line, then get srt end time
-			std::getline(infile, srttime, L' ');
-			std::getline(infile, srttime);  // remainder of line should be the srt end time
-
-			// process endtime
-			srttime_to_vlctime(endtime, srttime);
-
-			FilterFileArray.push_back({ cmdline, starttime, endtime });
-		}
-	}
-	FilterFileLoaded = 1;
-	
-	// debug dump of array... 
-	//ofstream myfile;
-	//myfile.open("RawFilterOutput.txt", ofstream::out);
-	//myfile << "dumping array...\n";
-	//for (int i = 0; i < FilterFileArray.size(); i++)
-	//{
-	//	myfile << FromWide(FilterFileArray[i].FilterType.c_str()) << ", " << FilterFileArray[i].starttime << ", " << FilterFileArray[i].endtime << "\n";
-	//}
-	//myfile.close();
-}
-
 // helper function for string comparison
 void toLower(basic_string<wchar_t>& s) {
 	for (basic_string<wchar_t>::iterator p = s.begin();
@@ -382,98 +90,7 @@ void toLower(basic_string<wchar_t>& s) {
 	}
 }
 
-
-
-/*****************************************************************************
-* ParsePacket: parse an SPU packet and send it to the video output
-*****************************************************************************
-* This function parses the SPU packet and, if valid, sends it to the
-* video output.
-*****************************************************************************/
-int framenumber=0;
-static int WordListLoaded = 0;
-static int ConfigFileLoaded = 0;
-
-// Will execute the filters loaded in FilterFile.txt at the appropriate time
-void * ParseFilters(void * input_data)
-{
-	decoder_owner_sys_t *p_owner = (decoder_owner_sys_t *)input_data;
-	input_thread_t *p_input_thread = p_owner->p_input;
-	libvlc_time_t timestamp;
-	mtime_t mdateval;
-	mtime_t inputtimeval;
-	libvlc_time_t duration;
-	ofstream myfile;
-	audio_output_t *p_aout;
-
-	// do this loop forever... 
-	// todo:  well, should be executed while main movie event is playing, can optimize later
-	while (1)
-	{
-		// only do below if ptr is valid; assuming this ptr stays valid for duration of movie playing...
-		if (p_input_thread)
-		{
-			// NOTE:  This 'time' var doesn't seem to line up with the start/stop values of mute, not sure how these time values relate to filterfile values right now
-			vlc_object_hold(p_input_thread);
-			timestamp = from_mtime(var_GetInteger(p_input_thread, "time"));
-			vlc_object_release(p_input_thread);
-
-			// Todo: optimize this scheme, better to periodically check?  or to put in wait until specific time based
-			//  on filter times?
-			// current method here is to just periodically check, will always wait ~100ms between each check.
-			// look for entry that timestamp is greater than start time and less than end time
-			for (int i = 0; i < FilterFileArray.size(); i++)
-			{
-				if ((timestamp > FilterFileArray[i].starttime) && (timestamp < FilterFileArray[i].endtime))
-				{
-					// debug
-					//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-					//myfile << "ParseFilters: Detected match. timestamp: " << timestamp << " start: " << FilterFileArray[i].starttime << " end: " << FilterFileArray[i].endtime << "\n";
-					//myfile.close();
-					if (FilterFileArray[i].FilterType == L"skip")
-					{
-						// debug message
-						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-						//myfile << "ParseFilters: Skipping video...\n";
-						//myfile.close();
-						// set new time 
-						vlc_object_hold(p_input_thread);
-						var_SetInteger(p_input_thread, "time", to_mtime(FilterFileArray[i].endtime + 300)); // todo:  fixme... need to add ~300ms to make sure new time doesn't fall into this same window, it seems not precise
-						vlc_object_release(p_input_thread);
-						break; // out of the for loop
-					} 
-					// TODO:  fix... muting is broken, seems domute function breaks, maybe bad ptrs
-					else if (FilterFileArray[i].FilterType == L"mute")
-					{
-						duration = FilterFileArray[i].endtime - FilterFileArray[i].starttime;
-						// debug message
-						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-						//myfile << "ParseFilters: Muting audio... duration: " << duration << "\n";
-						//myfile.close();
-						// mute
-						// get aout, return 0 means successful
-						if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
-						{
-							DoMute(1, duration, p_aout, true);
-						}
-						//msleep(to_mtime(duration * 1000)); // todo:  find better way to handle this, but for now, sleep while muting
-						//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-						//myfile << "ParseFilters: done sleeping...\n ";
-						//myfile.close();
-						break; // out of the for loop
-					}
-					
-				}
-			}
-		}
-		// wait for ~100ms (msleep uses usec)
-		msleep(100000);
-	}
-
-	return nullptr;
-}
-
-subpicture_t * ParsePacket(decoder_t *p_dec)
+subpicture_t * ParsePacket(decoder_t *p_dec, std::wstring *subtitle_text)
 {
 	decoder_sys_t *p_sys = p_dec->p_sys;
 	subpicture_t *p_spu;
@@ -522,100 +139,23 @@ subpicture_t * ParsePacket(decoder_t *p_dec)
 		spu_data.pi_offset[0], spu_data.pi_offset[1]);
 #endif
 
-	// TODO... Makes these parameters configurable by user
-	// Todo:  Enable this only once the movie has started, else it impacts dvd menus
-	// Todo:  should maybe move this outside of parsepackets
-	if (WordListLoaded == 0)
-	{
-		LoadWords();
-		WordListLoaded = 1;
-	}
 
-	if (ConfigFileLoaded == 0)
-	{
-		LoadConfig();
-		ConfigFileLoaded = 1;
-	}
+	// TODO:  might want to add a safe-mode here, where it will still mute when ocr fail to detect any text
+	//   This situation can occur either because OCR failed to detect any text or when it detects text incorrectly
+	//   In the meantime, can put "No Text Detected" in the filter word file to handle case where it fails to detect any text
+	//   seems decoder has particular issues with words 4 letters or less, i've seen problems on multiple dvds
+	*subtitle_text = OcrDecodeText(&spu_data, &spu_properties, p_sys);
+	toLower(*subtitle_text);
 
-	decoder_owner_sys_t *p_owner = p_dec->p_owner;
-	if (FilterOnTheFlyEnabled || DumpTextToFileEnabled)
-	{
-		ofstream myfile;
-		std::wstring decodedtxt(OcrDecodeText(&spu_data, &spu_properties));
-		toLower(decodedtxt);
-		if (FilterOnTheFlyEnabled)
-		{
-			libvlc_time_t duration = 0;
-
-			// TODO:  might want to add a safe-mode here, where it will still mute when ocr fail to detect any text
-			//   This situation can occur either because OCR failed to detect any text or when it detects text incorrectly
-			//   In the meantime, can put "No Text Detected" in the filter word file to handle case where it fails to detect any text
-			//   seems decoder has particular issues with words 4 letters or less, i've seen problems on multiple dvds
-			if (ParseForWords(decodedtxt) == TRUE)
-			{
-				mtime_t getdateresult = decoder_GetDisplayDate(p_dec, p_spu->i_start);
-				mtime_t getcurrentdate = mdate();
-				mtime_t datediff = getdateresult - getcurrentdate;
-				duration = from_mtime(p_spu->i_stop - p_spu->i_start);
-				// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
-				//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
-				// for debug... 
-				//input_thread_t *p_input_thread = p_owner->p_input;
-				//myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-				//vlc_object_hold(p_input_thread);
-				//myfile << "Calling mute... start: " << p_spu->i_start << " stop: " << p_spu->i_stop << " ipts: " << p_sys->i_pts << " mdate: " << getcurrentdate << " getdateresult: " << getdateresult << " datediff: " << datediff << " time var: " << var_GetInteger(p_input_thread, "time") << "\n";
-				//vlc_object_release(p_input_thread);
-				//myfile.close();
-
-				DoMute(from_mtime(datediff), duration, input_resource_HoldAout(p_owner->p_resource), false);
-			}
-		}
-		if (DumpTextToFileEnabled)
-		{
-			myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-			libvlc_time_t timestamp, n;
-			char starttime[SRT_BUF_SIZE];
-			char endtime[SRT_BUF_SIZE];
-
-			timestamp = from_mtime(p_spu->i_start);
-			vlctime_to_srttime(starttime, timestamp);
-
-			timestamp = from_mtime(p_spu->i_stop);
-			vlctime_to_srttime(endtime, timestamp);
-
-			framenumber++;
-			myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(decodedtxt.c_str()) << "\n\n";
-
-			myfile.close();
-		}
-	}
-
-	if (RenderEnable)
+	// only render if enabled
+	if (p_sys->b_RenderEnable)
 	{
 		Render(p_dec, p_spu, &spu_data, &spu_properties);
 	}
 
 	free(spu_data.p_data);
 
-	// NOTE.. this should not be in spudec... need to move at some point, but, for initial debug/enabling
-	if (ConfigOptionMap[L"VideoFilterEnabled"])
-	{
-		ofstream myfile;
-		libvlc_time_t timestamp, n;
-		vlc_thread_t newthread;
-		char * starttime;
-		// load filter file
-		if (!FilterFileLoaded)
-		{
-			LoadFilterFile();
-			// need to spawn another thread to loop on executing the filters
-			if (vlc_clone(&newthread, &ParseFilters, (void *)p_owner, 0) != 0)
-			{
-				//error, exit(?)
-				msg_Err(p_dec, "Failed to spawn filter thread.");
-			}
-		}
-	}
+
 
 	return p_spu;
 }

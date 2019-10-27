@@ -34,6 +34,12 @@ struct decoder_sys_t
 {
     bool b_packetizer;
     bool b_disabletrans;
+	//new
+	bool b_videofilterEnable;
+	bool b_audiofilterEnable;
+	bool b_RenderEnable;
+	bool b_DumpTextToFileEnable;
+	bool b_CaptureTextPicsEnable;
 
     mtime_t i_pts;
     unsigned int i_spu_size;
@@ -66,7 +72,7 @@ struct decoder_sys_t
 /*****************************************************************************
  * Prototypes
  *****************************************************************************/
-subpicture_t * ParsePacket( decoder_t * );
+subpicture_t * ParsePacket( decoder_t * , std::wstring *);
 
 typedef struct
 {
@@ -91,5 +97,4 @@ typedef struct
 	int i_x;
 	int i_y;
 } spu_properties_t;
-wchar_t * OcrDecodeText(subpicture_data_t * SubImageData, spu_properties_t * SpuProp);
-void DoMute(int64_t startmute, int64_t Duration, audio_output_t *p_aout, bool waitformute);
+wchar_t * OcrDecodeText(subpicture_data_t * SubImageData, spu_properties_t * SpuProp, decoder_sys_t *p_sys);
