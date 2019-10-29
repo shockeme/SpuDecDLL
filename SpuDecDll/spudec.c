@@ -113,85 +113,42 @@ typedef struct
 	mtime_t starttime;
 	mtime_t endtime;
 } FilterFileEntry;
-std::vector<FilterFileEntry> FilterFileArray;
+static std::vector<FilterFileEntry> FilterFileArray;
 
 
 
 int framenumber = 0;
-bool findFilterEntry(const FilterFileEntry &lhs, const FilterFileEntry &rhs) { return lhs.starttime < rhs.starttime; }
 
-/*
-int my_dmux_control(demux_t *p_input, int i_query, ...)
+static vlc_timer_t MyFilterTimer;
+
+static void MyFilterMuteFunc(void *p_this)
 {
-	va_list args;
-	int     i_result;
-
-	va_start(args, i_query);
-	i_result = demux_vaControl(p_input, DEMUX_GET_TIME, args);
-	va_end(args);
-
-	return i_result;
-}
-
-static bool update_time = false;
-static mtime_t global_timestamp = 0;
-
-static void MyFilterTimerFunc(void * input_data)
-{
-	input_thread_t *p_input_thread = (input_thread_t *)input_data;
+	input_thread_t *p_input_thread = (input_thread_t *)p_this;
 	mtime_t timestamp;
 	mtime_t duration;
 	mtime_t target_time = 0;
 	audio_output_t *p_aout;
-	char target_time_srt[SRT_BUF_SIZE];
-	char end_time_srt[SRT_BUF_SIZE];
-	char timestamp_srt[SRT_BUF_SIZE];
-	char start_time_srt[SRT_BUF_SIZE];
 
-
-	input_Control(p_input_thread, INPUT_GET_TIME, &timestamp);
-	// there's probably a better way to search, but for now, search in order through all entries until find match.
-	for (FilterFileEntry &my_array_entry : FilterFileArray)
+	duration = var_GetInteger(p_input_thread, "my_mute_var");
+	if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
 	{
-		if ((timestamp > my_array_entry.starttime) && (timestamp < my_array_entry.endtime))
-		{
-			if (my_array_entry.FilterType == L"skip")
-			{
-				// todo:  fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-				target_time = my_array_entry.endtime + to_mtime(400);
-				vlctime_to_srttime(target_time_srt, from_mtime(target_time));
-				vlctime_to_srttime(start_time_srt, from_mtime(my_array_entry.starttime));
-				vlctime_to_srttime(end_time_srt, from_mtime(my_array_entry.endtime));
-				vlctime_to_srttime(timestamp_srt, from_mtime(timestamp));
-				msg_Info(p_input_thread, "input_p: 0x%x, target time: %s, start: %s, end: %s, timestamp: %s\n", p_input_thread, target_time_srt, start_time_srt, end_time_srt, timestamp_srt);
-				global_timestamp = timestamp;
-				update_time = true;
-				//input_Control(p_input_thread, INPUT_SET_TIME, timestamp);
-				break; // out of for loop
-			}
-			// TODO: dvd timestamp is different than mdate, need to figure that out
-			//TODO:  figure out how to schedule the mutes and let audio filter take care of this
-			if (my_array_entry.FilterType == L"mute")
-			{
-				duration = my_array_entry.endtime - my_array_entry.starttime;
-				if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
-				{
-					// mute immediately
-					aout_MuteSet(p_aout, TRUE);
-					//mwait(my_array_entry.endtime);
-					msleep(duration);
-					aout_MuteSet(p_aout, FALSE);
-					vlc_object_release(p_aout);
-				}
-				break; // out of for loop
-			}
-		}
+		// mute immediately
+		aout_MuteSet(p_aout, TRUE);
+		//mwait(my_array_entry.endtime);
+		msleep(duration);
+		aout_MuteSet(p_aout, FALSE);
+		vlc_object_release(p_aout);
 	}
+	// clear mute flag before leaving
+	var_SetInteger(p_input_thread, "my_mute_var", 0);
 }
 
+// Will execute the filters loaded in FilterFile.txt at the appropriate time
+// NOTE:  this callback is blocking, so cannot delay too long in here
 static int MyTimeCallback(vlc_object_t *p_this, char const *psz_cmd,
 	vlc_value_t oldval, vlc_value_t newval, void *p_data)
 {
+	//input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_this));
 	input_thread_t *p_input_thread = (input_thread_t*)p_this;
 	mtime_t timestamp;
 	mtime_t duration;
@@ -199,16 +156,12 @@ static int MyTimeCallback(vlc_object_t *p_this, char const *psz_cmd,
 	audio_output_t *p_aout;
 	VLC_UNUSED(psz_cmd); VLC_UNUSED(oldval); VLC_UNUSED(p_data);
 	static bool schedule_skip = false;
-
-	//my_input_thread_private_t *myprivthread = my_input_priv(p_input_thread);
-	//demux_t * my_demux_p = myprivthread->master->p_demux;
-	vlc_value_t val;
+	double newposition;
+	int64_t length;
 
 	if (newval.i_int == INPUT_EVENT_POSITION)
 	{
-		// NOTE:  This 'time' var doesn't seem to line up with the start/stop values of mute, not sure how these time values relate to filterfile values right now
 		input_Control(p_input_thread, INPUT_GET_TIME, &timestamp);
-		//my_dmux_control(my_demux_p, DEMUX_GET_TIME, &timestamp);
 
 		// there's probably a better way to search, but for now, search in order through all entries until find match.
 		for (FilterFileEntry &my_array_entry : FilterFileArray)
@@ -217,115 +170,45 @@ static int MyTimeCallback(vlc_object_t *p_this, char const *psz_cmd,
 			{
 				if (my_array_entry.FilterType == L"skip")
 				{
-//					schedule_skip = true;
+					//msg_Info(p_input_thread, "\n\nGoing to set new position... \n\n");
 					// todo:  fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
 					target_time = my_array_entry.endtime + to_mtime(400); 
-					val.i_int = target_time;
-					//my_dmux_control(my_demux_p, DEMUX_SET_TIME, target_time);
-					//input_ControlPush(p_input_thread, INPUT_CONTROL_SET_TIME, &val);
+					// set time var doesn't work, movie hangs, so setting position for now
+					// this may change if moved to demux module
+					//input_Control(p_input_thread, INPUT_SET_TIME, target_time);
+					input_Control(p_input_thread, INPUT_GET_LENGTH, &length);
+					newposition = (double) target_time / (double) length;
+					input_Control(p_input_thread, INPUT_SET_POSITION, newposition);
 					break; // out of for loop
 
 				}
-					// TODO:  fix... muting is broken, seems domute function breaks, maybe bad ptrs
 				//TODO:  figure out how to schedule the mutes and let audio filter take care of this
 				if (my_array_entry.FilterType == L"mute")
 				{
-					duration = my_array_entry.endtime - my_array_entry.starttime;
-					// mute
-					// get aout, return 0 means successful
-					//// FIX
-					
-					if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
+					//msg_Info(p_input_thread, "\n\nGoing to mute... \n\n");
+					if (var_GetInteger(p_input_thread, "my_mute_var") == 0)
 					{
-						// mute immediately
-						aout_MuteSet(p_aout, TRUE);
-						//mwait(endtime);
-						msleep(duration);
-						aout_MuteSet(p_aout, FALSE);
-						vlc_object_release(p_aout);
+						duration = my_array_entry.endtime - my_array_entry.starttime;
+						var_SetInteger(p_input_thread, "my_mute_var", duration);
+						vlc_timer_schedule(MyFilterTimer, false, 1, 0);  // delay to 1 to initiate as soon as possible
 					}
-					
 					break; // out of for loop
 				}
 			}
+
 		}
 	}
-	//
-	//else if(schedule_skip == true)
-	//{
-	//	// set new time 
-	//	//var_SetInteger(p_input_thread, "time", my_array_entry.endtime + to_mtime(400)); // todo:  fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-	//	input_Control(p_input_thread, INPUT_SET_TIME, target_time);
-	//	schedule_skip = false;
-	//}
-	//
 	return VLC_SUCCESS;
 }
-*/
-// Will execute the filters loaded in FilterFile.txt at the appropriate time
 
-void * ParseFilters(void * input_data)
-{
-	input_thread_t *p_input_thread = (input_thread_t *)input_data;
-	mtime_t timestamp;
-	mtime_t target_time;
-	mtime_t inputtimeval;
-	mtime_t duration;
-	mtime_t starttime;
-	mtime_t endtime;
-	mtime_t currenttime;
-	mtime_t currenttime_ts;
-	ofstream myfile;
-	audio_output_t *p_aout;
 
-	// do this loop forever... 
-	// todo:  well, should be executed while main movie event is playing, can optimize later
-	while (1)
-	{
-		// only do below if ptr is valid; assuming this ptr stays valid for duration of movie playing...
-		input_Control(p_input_thread, INPUT_GET_TIME, &timestamp);
-		// there's probably a better way to search, but for now, search in order through all entries until find match.
-		for (FilterFileEntry &my_array_entry : FilterFileArray)
-		{
-			if ((timestamp > my_array_entry.starttime) && (timestamp < my_array_entry.endtime))
-			{
-				if (my_array_entry.FilterType == L"skip")
-				{
-					// todo:  fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-					target_time = my_array_entry.endtime + to_mtime(400);
-					input_Control(p_input_thread, INPUT_SET_TIME, target_time);
-					break; // out of for loop
-				}
-				// TODO: dvd timestamp is different than mdate, need to figure that out
-				//TODO:  figure out how to schedule the mutes and let audio filter take care of this
-				if (my_array_entry.FilterType == L"mute")
-				{
-					duration = my_array_entry.endtime - my_array_entry.starttime;
-					if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
-					{
-						// mute immediately
-						aout_MuteSet(p_aout, TRUE);
-						//mwait(my_array_entry.endtime);
-						msleep(duration);
-						aout_MuteSet(p_aout, FALSE);
-						vlc_object_release(p_aout);
-					}
-					break; // out of for loop
-				}
-			}
-		}
-		msleep(100000);
-	}
-
-	return nullptr;
-}
 
 /*****************************************************************************
 * ParseForWords: parse sentence and return TRUE if a cuss word is found
 * TODO: need to get a text file parsed at the start of the movie and then store
 * the words into an array for this function
 *****************************************************************************/
-std::vector<std::wstring> badwords;
+static std::vector<std::wstring> badwords;
 
 // This expects words to be listed 1 on each line with or without wildcard.  With no wildcards, then it will only match on the exact word
 // example contents for filter_words.txt:
@@ -392,7 +275,6 @@ static bool ParseForWords(std::wstring sentence)
 
 
 // This routine currently hardcoded to load file named:  FilterFile.txt
-static int FilterFileLoaded = 0;
 bool sortByStart(const FilterFileEntry &lhs, const FilterFileEntry &rhs) { return lhs.starttime < rhs.starttime; }
 
 static void LoadFilterFile(decoder_t *p_dec)
@@ -534,7 +416,6 @@ static void LoadFilterFile(decoder_t *p_dec)
 	//	msg_Info(p_dec, "type: %S, starttime: %lld\n", n.FilterType.c_str(), n.starttime);
 	//}
 
-	FilterFileLoaded = 1;
 }
 
 
@@ -635,7 +516,6 @@ static int DecoderOpen( vlc_object_t *p_this )
     p_dec->pf_packetize = NULL;
 
 	// filter stuff
-	vlc_timer_t MyFilterTimer;
 	// Todo:  Enable this only once the movie has started, else it impacts dvd menus
 	// Todo:  should maybe move this outside of parsepackets
 	if (p_sys->b_audiofilterEnable)
@@ -643,34 +523,20 @@ static int DecoderOpen( vlc_object_t *p_this )
 		msg_Info(p_dec, "\n\nLoading words file.\n\n");
 		LoadWords();
 	}
+	
 	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
-
+	// this is for muting, perhaps will eventually be defined in audio filter module?
+	var_Create(p_input_thread, "my_mute_var", VLC_VAR_INTEGER);
+	var_SetInteger(p_input_thread, "my_mute_var", 0);
+	// timer will be used to spawn mute activity in callback; should eventually be done with audio filter?
+	vlc_timer_create(&MyFilterTimer, &MyFilterMuteFunc, p_input_thread);
 	if (p_sys->b_videofilterEnable)
 	{
-		vlc_thread_t newthread;
-		// load filter file
-		if (!FilterFileLoaded)
-		{
-
-			msg_Info(p_dec, "\n\nLoading filter file.\n\n");
-			LoadFilterFile(p_dec);
-
-			////// TODO: callback & timer interrupt seem to not work.  Not sure if because something is not re-entrant or need lock somewhere
-			//////   For now, will just clone another thread and use that.
-			////// This activity should probably be moved to demux module
-			// callback for time update?
-			//var_AddCallback(p_input_thread, "intf-event", MyTimeCallback, NULL);
-
-			// use timer for this?
-			//vlc_timer_create(&MyFilterTimer, &MyFilterTimerFunc, p_input_thread);
-			//vlc_timer_schedule(MyFilterTimer, false, FILTER_TIME_PERIOD, FILTER_TIME_PERIOD);
-			// need to spawn another thread to loop on executing the filters
-			if (vlc_clone(&newthread, &ParseFilters, p_input_thread, 0) != 0)
-			{
-				//error, exit(?)
-				msg_Err(p_dec, "Failed to spawn filter thread.");
-			}
-		}
+		msg_Info(p_dec, "\n\nLoading filter file.\n\n");
+		LoadFilterFile(p_dec);
+		
+		msg_Info(p_dec, "\n\nAdding filter callback\n\n");
+		var_AddCallback(p_input_thread, "intf-event", MyTimeCallback, NULL);
 	}
 
     return VLC_SUCCESS;
@@ -706,7 +572,14 @@ static void Close( vlc_object_t *p_this )
     decoder_t     *p_dec = (decoder_t*)p_this;
     decoder_sys_t *p_sys = p_dec->p_sys;
 
-
+	// filter cleanup stuff
+	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
+	if (p_sys->b_videofilterEnable)
+	{
+		msg_Info(p_dec, "\n\nremoving filter callback\n\n");
+		var_DelCallback(p_input_thread, "intf-event", MyTimeCallback, NULL);
+		FilterFileArray.clear();
+	}
 
     if( p_sys->p_block )
     {
@@ -733,6 +606,7 @@ static int Decode( decoder_t *p_dec, block_t *p_block )
 	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
 	
 	mtime_t mute_start, mute_stop;
+	mtime_t duration;
 
 
     if( p_block == NULL ) /* No Drain */
@@ -777,19 +651,17 @@ static int Decode( decoder_t *p_dec, block_t *p_block )
 			// this mute should be scheduled/queued somehow, then processed by audio filter, along with mutes from filter file
 			// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
 			//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
-			// if valid audio ptr, else skip the mute attempt
-			if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
-			{
-				//msg_Info(p_dec, "will be muting audio... start: %lld, end: %lld, aout: 0x%x\n", mutedata.startmute, mutedata.endmute, mutedata.p_aout);
-				mwait(decoder_GetDisplayDate(p_dec, mute_start));
-				aout_MuteSet(p_aout, TRUE);
-				mwait(decoder_GetDisplayDate(p_dec, mute_stop));
-				aout_MuteSet(p_aout, FALSE);
-				vlc_object_release(p_aout);
-			}
 			// can we use this to queue a mute?
 			//block_t * 	decoder_NewAudioBuffer(decoder_t *, int i_nb_samples)
 			//static void 	decoder_QueueAudio(decoder_t *dec, block_t *p_aout_buf)
+			// for now, use this func to queue the mute, ideally would have atomic rmw for setting this var, but oh well
+			// this should change anyway, if implemented in an audio filter
+			if (var_GetInteger(p_input_thread, "my_mute_var") == 0)
+			{
+				duration = mute_stop - mute_start;
+				var_SetInteger(p_input_thread, "my_mute_var", duration);
+				vlc_timer_schedule(MyFilterTimer, true, decoder_GetDisplayDate(p_dec, mute_start), 0);  // delay to 1 to initiate as soon as possible
+			}
 		}
 	}
 	ofstream myfile;
