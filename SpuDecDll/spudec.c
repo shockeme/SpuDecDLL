@@ -47,40 +47,22 @@ using namespace std;
 #include <vlc_input.h> 
 #include <vlc_aout.h>
 
-//#include <..\libvlc.h>
-// Note, future version of vlc (4.0?) has new time macros, probably won't need these locally defined
-// this definition taken from libvlc.h
-typedef int64_t libvlc_time_t;
-// note... these copied from libvlc_internal.h
-static inline libvlc_time_t from_mtime(mtime_t time)
-{
-	return (time + 500ULL) / 1000ULL;
-}
-
-static inline mtime_t to_mtime(libvlc_time_t time)
-{
-	return time * 1000ULL;
-}
-
-
 // i think this is defined in newer version of vlc, but for now, define here:
 vlc_object_t * vlc_object_parent(vlc_object_t * myobj)
 {
 	return myobj->obj.parent;
 }
 
-
-
-
 // filter stuff
 static bool ParseForWords(std::wstring sentence);
 
 #define SRT_BUF_SIZE 50
 // note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
-static void vlctime_to_srttime(char srttimebuf[SRT_BUF_SIZE], libvlc_time_t itime)
+static void mtime_to_srttime(char srttimebuf[SRT_BUF_SIZE], mtime_t itime_in)
 {
-	//static char srttimebuf[SRT_BUF_SIZE];
-	libvlc_time_t n;
+	mtime_t n;
+	mtime_t itime;
+	itime = (itime_in + 500ULL) / 1000ULL;
 	unsigned int milliseconds = (itime) % 1000;
 	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
 	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
@@ -88,7 +70,7 @@ static void vlctime_to_srttime(char srttimebuf[SRT_BUF_SIZE], libvlc_time_t itim
 	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 }
 
-static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srttime)
+static void srttime_to_mtime(mtime_t &itime, std::wstring srttime)
 {
 	// format of srttime is:  hh:mm:ss,ms. <== 3 digits of ms
 	// might be a better way of doing this... but, for now... just change : and , to space to help with parsing
@@ -101,23 +83,19 @@ static void srttime_to_vlctime(libvlc_time_t &itime, std::wstring srttime)
 	unsigned int seconds;
 	unsigned int milliseconds;
 	if (!(iss >> hours >> minutes >> seconds >> milliseconds)) { return; } // error
-	// stuff below doing reverse of calculations in vlctime_to_srttime
-	itime = (((((hours * 60) + minutes) * 60) + seconds) * 1000) + milliseconds;
+	// stuff below doing reverse of calculations in mtime_to_srttime
+	itime = ((((((hours * 60) + minutes) * 60) + seconds) * 1000) + milliseconds) * 1000ULL;
 
 }
 
-
+// move to common header
 typedef struct
 {
 	wstring FilterType;
 	mtime_t starttime;
 	mtime_t endtime;
 } FilterFileEntry;
-static std::vector<FilterFileEntry> FilterFileArray;
-
-
-
-int framenumber = 0;
+std::vector<FilterFileEntry> FilterFileArray;
 
 static vlc_timer_t MyFilterTimer;
 
@@ -141,64 +119,6 @@ static void MyFilterMuteFunc(void *p_this)
 	}
 	// clear mute flag before leaving
 	var_SetInteger(p_input_thread, "my_mute_var", 0);
-}
-
-// Will execute the filters loaded in FilterFile.txt at the appropriate time
-// NOTE:  this callback is blocking, so cannot delay too long in here
-static int MyTimeCallback(vlc_object_t *p_this, char const *psz_cmd,
-	vlc_value_t oldval, vlc_value_t newval, void *p_data)
-{
-	//input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_this));
-	input_thread_t *p_input_thread = (input_thread_t*)p_this;
-	mtime_t timestamp;
-	mtime_t duration;
-	mtime_t target_time = 0;
-	audio_output_t *p_aout;
-	VLC_UNUSED(psz_cmd); VLC_UNUSED(oldval); VLC_UNUSED(p_data);
-	static bool schedule_skip = false;
-	double newposition;
-	int64_t length;
-
-	if (newval.i_int == INPUT_EVENT_POSITION)
-	{
-		input_Control(p_input_thread, INPUT_GET_TIME, &timestamp);
-
-		// there's probably a better way to search, but for now, search in order through all entries until find match.
-		for (FilterFileEntry &my_array_entry : FilterFileArray)
-		{
-			if ((timestamp > my_array_entry.starttime) && (timestamp < my_array_entry.endtime))
-			{
-				if (my_array_entry.FilterType == L"skip")
-				{
-					//msg_Info(p_input_thread, "\n\nGoing to set new position... \n\n");
-					// todo:  fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-					target_time = my_array_entry.endtime + to_mtime(400); 
-					// set time var doesn't work, movie hangs, so setting position for now
-					// this may change if moved to demux module
-					//input_Control(p_input_thread, INPUT_SET_TIME, target_time);
-					input_Control(p_input_thread, INPUT_GET_LENGTH, &length);
-					newposition = (double) target_time / (double) length;
-					input_Control(p_input_thread, INPUT_SET_POSITION, newposition);
-					break; // out of for loop
-
-				}
-				//TODO:  figure out how to schedule the mutes and let audio filter take care of this
-				if (my_array_entry.FilterType == L"mute")
-				{
-					//msg_Info(p_input_thread, "\n\nGoing to mute... \n\n");
-					if (var_GetInteger(p_input_thread, "my_mute_var") == 0)
-					{
-						duration = my_array_entry.endtime - my_array_entry.starttime;
-						var_SetInteger(p_input_thread, "my_mute_var", duration);
-						vlc_timer_schedule(MyFilterTimer, false, 1, 0);  // delay to 1 to initiate as soon as possible
-					}
-					break; // out of for loop
-				}
-			}
-
-		}
-	}
-	return VLC_SUCCESS;
 }
 
 
@@ -283,8 +203,8 @@ static void LoadFilterFile(decoder_t *p_dec)
 	std::wstring filterfilename;
 	std::wstring cmdline;
 	std::wstring srttime;
-	libvlc_time_t starttime;
-	libvlc_time_t endtime;
+	mtime_t starttime_mt;
+	mtime_t endtime_mt;
 
 	// get name of dvdrom
 	WCHAR myDrives[105];
@@ -379,8 +299,6 @@ static void LoadFilterFile(decoder_t *p_dec)
 		msg_Info(p_dec, "Successfully loaded filter file: %S\n", filterfilename);
 	}
 
-	mtime_t starttime_mt;
-	mtime_t endtime_mt;
 
 	// there's probably a better way to parse this...
 	// first line is chapter num?  Is this only line formatted like this?
@@ -394,16 +312,14 @@ static void LoadFilterFile(decoder_t *p_dec)
 			// next getline gets srt start time
 			std::getline(infile, srttime, L' ');
 			// process start time
-			srttime_to_vlctime(starttime, srttime);
-			starttime_mt = to_mtime(starttime);
+			srttime_to_mtime(starttime_mt, srttime);
 
 			// get & throw away intermediate content on line, then get srt end time
 			std::getline(infile, srttime, L' ');
 			std::getline(infile, srttime);  // remainder of line should be the srt end time
 
 			// process endtime
-			srttime_to_vlctime(endtime, srttime);
-			endtime_mt = to_mtime(endtime);
+			srttime_to_mtime(endtime_mt, srttime);
 
 			FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt });
 
@@ -428,9 +344,18 @@ static void LoadFilterFile(decoder_t *p_dec)
 /*****************************************************************************
  * Module descriptor.
  *****************************************************************************/
+// spu decoder
 static int  DecoderOpen   ( vlc_object_t * );
 static int  PacketizerOpen( vlc_object_t * );
 static void Close         ( vlc_object_t * );
+
+// audio decoder
+int InitAudioDec(vlc_object_t *);
+void EndAudioDec(vlc_object_t *);
+
+// input demux
+int  DemuxOpen(vlc_object_t *);
+void DemuxClose(vlc_object_t *);
 
 #define DVDSUBTRANS_DISABLE_TEXT N_("Disable DVD subtitle transparency")
 #define DVDSUBTRANS_DISABLE_LONGTEXT N_("Removes all transparency effects " \
@@ -451,7 +376,7 @@ vlc_module_begin ()
     set_shortname( N_("Movie filter") )
     set_capability( "spu decoder", 100 )
     set_category( CAT_INPUT )
-    set_subcategory( SUBCAT_INPUT_SCODEC )
+    set_subcategory(SUBCAT_INPUT_GENERAL)
     set_callbacks( DecoderOpen, Close )
 
     add_bool( "dvdsub-transparency", false,
@@ -470,6 +395,17 @@ vlc_module_begin ()
     set_description( N_("DVD subtitles packetizer") )
     set_capability( "packetizer", 50 )
     set_callbacks( PacketizerOpen, Close )
+
+	add_submodule()
+	add_shortcut("MovAudDecFlt")
+	set_capability("audio decoder", 80)
+	set_callbacks(InitAudioDec, EndAudioDec)
+
+	add_submodule()
+	add_shortcut("dvd")  // dvd name is required here, else it will only load dvdnav module directly
+	set_capability("access_demux", 80)
+	set_callbacks(DemuxOpen, DemuxClose)
+
 vlc_module_end ()
 
 /*****************************************************************************
@@ -487,7 +423,6 @@ static block_t *      Packetize ( decoder_t *, block_t ** );
  * to chose.
  *****************************************************************************/
 
-#define FILTER_TIME_PERIOD 100000
 static int DecoderOpen( vlc_object_t *p_this )
 {
     decoder_t     *p_dec = (decoder_t*)p_this;
@@ -535,8 +470,6 @@ static int DecoderOpen( vlc_object_t *p_this )
 		msg_Info(p_dec, "\n\nLoading filter file.\n\n");
 		LoadFilterFile(p_dec);
 		
-		msg_Info(p_dec, "\n\nAdding filter callback\n\n");
-		var_AddCallback(p_input_thread, "intf-event", MyTimeCallback, NULL);
 	}
 
     return VLC_SUCCESS;
@@ -576,8 +509,6 @@ static void Close( vlc_object_t *p_this )
 	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
 	if (p_sys->b_videofilterEnable)
 	{
-		msg_Info(p_dec, "\n\nremoving filter callback\n\n");
-		var_DelCallback(p_input_thread, "intf-event", MyTimeCallback, NULL);
 		FilterFileArray.clear();
 	}
 
@@ -593,7 +524,8 @@ static void Close( vlc_object_t *p_this )
  * Decode:
  *****************************************************************************/
 
-
+mtime_t mute_start_time = 0;
+mtime_t mute_end_time = 0;
 static mtime_t mdateprevious=0;
 static mtime_t timeprevious=0;
 static int Decode( decoder_t *p_dec, block_t *p_block )
@@ -647,21 +579,9 @@ static int Decode( decoder_t *p_dec, block_t *p_block )
 		if (ParseForWords(subtitle_text) == TRUE)
 		{
 			//msg_Info(p_dec, "Detected forbidden word!\n");
-			// after subtitle has been queued, then can go through mute routine...
-			// this mute should be scheduled/queued somehow, then processed by audio filter, along with mutes from filter file
-			// TODO:  mute timeframe should stay in sync with movie, so, pause in movie should keep mute on until unpause and hit end duration
-			//        is there a way to figure out when spu un-renders the subtitle?  then could use that to trigger unmute?
-			// can we use this to queue a mute?
-			//block_t * 	decoder_NewAudioBuffer(decoder_t *, int i_nb_samples)
-			//static void 	decoder_QueueAudio(decoder_t *dec, block_t *p_aout_buf)
-			// for now, use this func to queue the mute, ideally would have atomic rmw for setting this var, but oh well
-			// this should change anyway, if implemented in an audio filter
-			if (var_GetInteger(p_input_thread, "my_mute_var") == 0)
-			{
-				duration = mute_stop - mute_start;
-				var_SetInteger(p_input_thread, "my_mute_var", duration);
-				vlc_timer_schedule(MyFilterTimer, true, decoder_GetDisplayDate(p_dec, mute_start), 0);  // delay to 1 to initiate as soon as possible
-			}
+			// queue the mute
+			mute_start_time = mute_start;
+			mute_end_time = mute_stop;
 		}
 	}
 	ofstream myfile;
@@ -669,18 +589,14 @@ static int Decode( decoder_t *p_dec, block_t *p_block )
 	if (p_sys->b_DumpTextToFileEnable)
 	{
 		myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
-		libvlc_time_t timestamp;
 		char starttime[SRT_BUF_SIZE];
 		char endtime[SRT_BUF_SIZE];
 
-		timestamp = from_mtime(p_spu->i_start);
-		vlctime_to_srttime(starttime, timestamp);
+		mtime_to_srttime(starttime, p_spu->i_start);
 
-		timestamp = from_mtime(p_spu->i_stop);
-		vlctime_to_srttime(endtime, timestamp);
+		mtime_to_srttime(endtime, p_spu->i_stop);
 
-		framenumber++;
-		myfile << framenumber << "\n" << starttime << " --> " << endtime << "\n" << FromWide(subtitle_text.c_str()) << "\n\n";
+		myfile << 1 << "\n" << starttime << " --> " << endtime << "\n" << FromWide(subtitle_text.c_str()) << "\n\n";
 
 		myfile.close();
 	}

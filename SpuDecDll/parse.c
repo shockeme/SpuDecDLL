@@ -24,7 +24,6 @@
 *****************************************************************************/
 #include "stdafx.h"
 #include "stdio.h"
-#include "time.h"
 
 /*****************************************************************************
 * Preamble
@@ -33,18 +32,11 @@
 # include "config.h"
 #endif
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
 #include <vector>
 #include <wctype.h>
 using namespace std;
 
 #include "spudec.h"
-
-//#include "..\libvlc.h"  // this is in 1 level above the plugins include area; could change include paths for this
-#include <vlc_common.h>
-
 
 /*****************************************************************************
 * Local prototypes.

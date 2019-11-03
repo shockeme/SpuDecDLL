@@ -1,10 +1,11 @@
 #pragma once
 
 #include <BaseTsd.h>
+int strcasecmp(const char *, const char *);
 typedef SSIZE_T ssize_t;
 //#define restrict    __restrict      
 #define strdup _strdup
-#define MODULE_STRING "spudec"
+#define MODULE_STRING "MvFlt"
 #define N_(str) (str)
 
 //#define __cplusplus
