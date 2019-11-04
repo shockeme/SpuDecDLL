@@ -23,78 +23,13 @@
 
 // Include vlc headers
 #include <vlc_common.h>
-#include <vlc_codec.h>
-#include <vlc_input.h>
  // redefine restrict to MS friendly just for include of vlc_charset (otherwise will cause problems)
 #define restrict __restrict
 #include <vlc_charset.h>
 #undef restrict
 
-struct decoder_sys_t
-{
-    bool b_packetizer;
-    bool b_disabletrans;
-	//new
-	bool b_videofilterEnable;
-	bool b_audiofilterEnable;
-	bool b_RenderEnable;
-	bool b_DumpTextToFileEnable;
-	bool b_CaptureTextPicsEnable;
-
-    mtime_t i_pts;
-    unsigned int i_spu_size;
-    unsigned int i_rle_size;
-    unsigned int i_spu;
-
-    block_t *p_block;
-
-    /* We will never overflow */
-    uint8_t buffer[65536];
-};
-
-/*****************************************************************************
- * Amount of bytes we GetChunk() in one go
- *****************************************************************************/
-#define SPU_CHUNK_SIZE              0x200
-
-/*****************************************************************************
- * SPU commands
- *****************************************************************************/
-#define SPU_CMD_FORCE_DISPLAY       0x00
-#define SPU_CMD_START_DISPLAY       0x01
-#define SPU_CMD_STOP_DISPLAY        0x02
-#define SPU_CMD_SET_PALETTE         0x03
-#define SPU_CMD_SET_ALPHACHANNEL    0x04
-#define SPU_CMD_SET_COORDINATES     0x05
-#define SPU_CMD_SET_OFFSETS         0x06
-#define SPU_CMD_END                 0xff
-
 /*****************************************************************************
  * Prototypes
  *****************************************************************************/
-subpicture_t * ParsePacket( decoder_t * , std::wstring *);
 
-typedef struct
-{
-	int   pi_offset[2];                              /* byte offsets to data */
-	uint16_t *p_data;
-
-	/* Color information */
-	bool b_palette;
-	uint8_t    pi_alpha[4];
-	uint8_t    pi_yuv[4][3];
-
-	/* Auto crop fullscreen subtitles */
-	bool b_auto_crop;
-	int i_y_top_offset;
-	int i_y_bottom_offset;
-
-} subpicture_data_t;
-typedef struct
-{
-	int i_width;
-	int i_height;
-	int i_x;
-	int i_y;
-} spu_properties_t;
-wchar_t * OcrDecodeText(subpicture_data_t * SubImageData, spu_properties_t * SpuProp, decoder_sys_t *p_sys);
+wchar_t * OcrDecodeText(subpicture_region_t * SpuProp, bool SavePicToFile);

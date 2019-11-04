@@ -41,19 +41,22 @@ using namespace std;
 
 #include "vlc_plugin.h"
 #include "spudec.h"
-
+#include <vlc_codec.h>
 #include <vlc_common.h>
-// including input header cause we are using some functions from input module, the parent of this module
-#include <vlc_input.h> 
-#include <vlc_aout.h>
+#include <vlc_modules.h>
 
-// i think this is defined in newer version of vlc, but for now, define here:
-vlc_object_t * vlc_object_parent(vlc_object_t * myobj)
+// ***
+// mv to common header file?
+typedef struct
 {
-	return myobj->obj.parent;
-}
+	wstring FilterType;
+	mtime_t starttime;
+	mtime_t endtime;
+} FilterFileEntry;
+// declare as VLC var somehow?
+std::vector<FilterFileEntry> FilterFileArray;
+// ****
 
-// filter stuff
 static bool ParseForWords(std::wstring sentence);
 
 #define SRT_BUF_SIZE 50
@@ -88,40 +91,6 @@ static void srttime_to_mtime(mtime_t &itime, std::wstring srttime)
 
 }
 
-// move to common header
-typedef struct
-{
-	wstring FilterType;
-	mtime_t starttime;
-	mtime_t endtime;
-} FilterFileEntry;
-std::vector<FilterFileEntry> FilterFileArray;
-
-static vlc_timer_t MyFilterTimer;
-
-static void MyFilterMuteFunc(void *p_this)
-{
-	input_thread_t *p_input_thread = (input_thread_t *)p_this;
-	mtime_t timestamp;
-	mtime_t duration;
-	mtime_t target_time = 0;
-	audio_output_t *p_aout;
-
-	duration = var_GetInteger(p_input_thread, "my_mute_var");
-	if (!input_Control(p_input_thread, INPUT_GET_AOUT, &p_aout))
-	{
-		// mute immediately
-		aout_MuteSet(p_aout, TRUE);
-		//mwait(my_array_entry.endtime);
-		msleep(duration);
-		aout_MuteSet(p_aout, FALSE);
-		vlc_object_release(p_aout);
-	}
-	// clear mute flag before leaving
-	var_SetInteger(p_input_thread, "my_mute_var", 0);
-}
-
-
 
 /*****************************************************************************
 * ParseForWords: parse sentence and return TRUE if a cuss word is found
@@ -141,6 +110,9 @@ static void LoadWords()
 	// Todo:  change input file format, or somehow obfuscate the contents
 	std::wifstream infile("filter_words.txt");
 	std::wstring line;
+
+	badwords.clear();
+
 	while (std::getline(infile, line))
 	{
 		// todo:  should also check if string is not empty but has only white space, and ignore that line...
@@ -212,6 +184,8 @@ static void LoadFilterFile(decoder_t *p_dec)
 	WCHAR fileSystemName[MAX_PATH];
 	DWORD serialNumber, maxComponentLen, fileSystemFlags;
 	UINT driveType;
+
+	FilterFileArray.clear();
 
 	if (!GetLogicalDriveStringsW(ARRAYSIZE(myDrives) - 1, myDrives))
 	{
@@ -339,14 +313,11 @@ static void LoadFilterFile(decoder_t *p_dec)
 
 
 
-
-
 /*****************************************************************************
  * Module descriptor.
  *****************************************************************************/
 // spu decoder
 static int  DecoderOpen   ( vlc_object_t * );
-static int  PacketizerOpen( vlc_object_t * );
 static void Close         ( vlc_object_t * );
 
 // audio decoder
@@ -379,7 +350,7 @@ vlc_module_begin ()
     set_subcategory(SUBCAT_INPUT_GENERAL)
     set_callbacks( DecoderOpen, Close )
 
-    add_bool( "dvdsub-transparency", false,
+	add_bool( "dvdsub-transparency", false,
               DVDSUBTRANS_DISABLE_TEXT, DVDSUBTRANS_DISABLE_LONGTEXT, true )
 	add_bool("dvdsub-video-filter", true,
 		DVDSUBVID_FLT_DISABLE_TEXT, DVDSUBVID_FLT_DISABLE_LONGTEXT, true)
@@ -391,10 +362,6 @@ vlc_module_begin ()
 		DVDSUBAUDIO_SUB_TO_FILE_TEXT, DVDSUBAUDIO_SUB_TO_FILE_TEXT, true)
 	add_bool("dvdsub-save-text-pic-enable", false,
 		DVDSUBAUDIO_SAVE_SUB_PIC_TEXT, DVDSUBAUDIO_SAVE_SUB_PIC_TEXT, true)
-	add_submodule ()
-    set_description( N_("DVD subtitles packetizer") )
-    set_capability( "packetizer", 50 )
-    set_callbacks( PacketizerOpen, Close )
 
 	add_submodule()
 	add_shortcut("MovAudDecFlt")
@@ -408,186 +375,71 @@ vlc_module_begin ()
 
 vlc_module_end ()
 
+struct decoder_sys_t
+{
+	decoder_t * p_subdec;
+
+	//new
+	bool b_videofilterEnable;
+	bool b_audiofilterEnable;
+	bool b_RenderEnable;
+	bool b_DumpTextToFileEnable;
+	bool b_CaptureTextPicsEnable;
+};
+
+
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
-static block_t *      Reassemble( decoder_t *, block_t * );
 static int            Decode    ( decoder_t *, block_t * );
-static block_t *      Packetize ( decoder_t *, block_t ** );
 
-
-/*****************************************************************************
- * DecoderOpen
- *****************************************************************************
- * Tries to launch a decoder and return score so that the interface is able
- * to chose.
- *****************************************************************************/
-
-static int DecoderOpen( vlc_object_t *p_this )
-{
-    decoder_t     *p_dec = (decoder_t*)p_this;
-    decoder_sys_t *p_sys;
-
-	if( p_dec->fmt_in.i_codec != VLC_CODEC_SPU )
-        return VLC_EGENERIC;
-
-    p_dec->p_sys = p_sys = (decoder_sys_t *) malloc( sizeof( decoder_sys_t ) );
-
-    p_sys->b_packetizer = false;
-    p_sys->b_disabletrans = var_InheritBool( p_dec, "dvdsub-transparency" );
-	p_sys->b_videofilterEnable = var_InheritBool(p_dec, "dvdsub-video-filter");
-	p_sys->b_audiofilterEnable = var_InheritBool(p_dec, "dvdsub-audio-filter");
-	p_sys->b_RenderEnable = var_InheritBool(p_dec, "dvdsub-render-enable");
-	p_sys->b_DumpTextToFileEnable = var_InheritBool(p_dec, "dvdsub-text-to-file-enable");
-	p_sys->b_CaptureTextPicsEnable = var_InheritBool(p_dec, "dvdsub-save-text-pic-enable");
-
-	p_sys->i_spu_size = 0;
-    p_sys->i_spu      = 0;
-    p_sys->p_block    = NULL;
-
-    p_dec->fmt_out.i_codec = VLC_CODEC_SPU;
-
-    p_dec->pf_decode    = Decode;
-    p_dec->pf_packetize = NULL;
-
-	// filter stuff
-	// Todo:  Enable this only once the movie has started, else it impacts dvd menus
-	// Todo:  should maybe move this outside of parsepackets
-	if (p_sys->b_audiofilterEnable)
-	{
-		msg_Info(p_dec, "\n\nLoading words file.\n\n");
-		LoadWords();
-	}
-	
-	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
-	// this is for muting, perhaps will eventually be defined in audio filter module?
-	var_Create(p_input_thread, "my_mute_var", VLC_VAR_INTEGER);
-	var_SetInteger(p_input_thread, "my_mute_var", 0);
-	// timer will be used to spawn mute activity in callback; should eventually be done with audio filter?
-	vlc_timer_create(&MyFilterTimer, &MyFilterMuteFunc, p_input_thread);
-	if (p_sys->b_videofilterEnable)
-	{
-		msg_Info(p_dec, "\n\nLoading filter file.\n\n");
-		LoadFilterFile(p_dec);
-		
-	}
-
-    return VLC_SUCCESS;
-}
-
-/*****************************************************************************
- * PacketizerOpen
- *****************************************************************************
- * Tries to launch a decoder and return score so that the interface is able
- * to chose.
- *****************************************************************************/
-static int PacketizerOpen( vlc_object_t *p_this )
-{
-    decoder_t *p_dec = (decoder_t*)p_this;
-
-    if( DecoderOpen( p_this ) )
-    {
-        return VLC_EGENERIC;
-    }
-    p_dec->pf_packetize  = Packetize;
-    p_dec->p_sys->b_packetizer = true;
-    es_format_Copy( &p_dec->fmt_out, &p_dec->fmt_in );
-    p_dec->fmt_out.i_codec = VLC_CODEC_SPU;
-
-    return VLC_SUCCESS;
-}
-
-/*****************************************************************************
- * Close:
- *****************************************************************************/
-static void Close( vlc_object_t *p_this )
-{
-    decoder_t     *p_dec = (decoder_t*)p_this;
-    decoder_sys_t *p_sys = p_dec->p_sys;
-
-	// filter cleanup stuff
-	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
-	if (p_sys->b_videofilterEnable)
-	{
-		FilterFileArray.clear();
-	}
-
-    if( p_sys->p_block )
-    {
-        block_ChainRelease( p_sys->p_block );
-    }
-
-    free( p_sys );
-}
-
-/*****************************************************************************
- * Decode:
- *****************************************************************************/
-
+static decoder_t * my_local_p_dec = NULL;
 mtime_t mute_start_time = 0;
 mtime_t mute_end_time = 0;
-static mtime_t mdateprevious=0;
-static mtime_t timeprevious=0;
-static int Decode( decoder_t *p_dec, block_t *p_block )
+
+// helper function for string comparison
+void toLower(basic_string<wchar_t>& s) {
+	for (basic_string<wchar_t>::iterator p = s.begin();
+		p != s.end(); ++p) {
+		*p = towlower(*p);
+	}
+}
+// note: this is called from subdecoder, so the p_dec pointer is the subdec pointer, not local one
+// need to use local pointer for calling original queue audio
+static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 {
-    decoder_sys_t *p_sys = p_dec->p_sys;
-    block_t       *p_spu_block;
-    subpicture_t  *p_spu;
-	std::wstring subtitle_text;
-	audio_output_t *p_aout;
-	input_thread_t *p_input_thread = (input_thread_t *)vlc_object_parent(VLC_OBJECT(p_dec));
-	
-	mtime_t mute_start, mute_stop;
-	mtime_t duration;
+	std::wstring subtitle_text=L"";
+	decoder_sys_t * p_sys = my_local_p_dec->p_sys;
 
+	// this comes from decoder_QueueSub in vlc_codec.h
+	assert(p_spu->p_next == NULL);
+	assert(my_local_p_dec->pf_queue_sub != NULL);
 
-    if( p_block == NULL ) /* No Drain */
-        return VLCDEC_SUCCESS;
-    p_spu_block = Reassemble( p_dec, p_block );
+	// can access pic here
+	picture_t * sub_pic;
+	subpicture_region_t * sub_region;
+	sub_region = p_spu->p_region;
+	sub_pic = p_spu->p_region->p_picture;
 
-    if( ! p_spu_block )
-    {
-        return VLCDEC_SUCCESS;
-    }
+	// if enabled, let's parts the subtitle pic and convert to string
+	subtitle_text.assign(OcrDecodeText(sub_region, p_sys->b_CaptureTextPicsEnable));
+	toLower(subtitle_text);
 
-    /* FIXME: what the, we shouldn’t need to allocate 64k of buffer --sam. */
-    p_sys->i_spu = block_ChainExtract( p_spu_block, p_sys->buffer, 65536 );
-    p_sys->i_pts = p_spu_block->i_pts;
-    block_ChainRelease( p_spu_block );
-
-	/* Parse and decode */
-    p_spu = ParsePacket( p_dec , &subtitle_text);
-
-    /* reinit context */
-    p_sys->i_spu_size = 0;
-    p_sys->i_rle_size = 0;
-    p_sys->i_spu      = 0;
-    p_sys->p_block    = NULL;
-
-	// save for filter, later
-	mute_start = p_spu->i_start;
-	mute_stop = p_spu->i_stop;
-	// end filter saving stuff
-
-    if( p_spu != NULL )
-        decoder_QueueSub( p_dec, p_spu );
-
-	// More filter stuff...
 	//msg_Info(p_dec, "subtitle_text: %s\n", FromWide(subtitle_text.c_str()));
 	if (p_sys->b_audiofilterEnable)
 	{
 		if (ParseForWords(subtitle_text) == TRUE)
 		{
-			//msg_Info(p_dec, "Detected forbidden word!\n");
+			// TODO:  change to use vlc vars?
 			// queue the mute
-			mute_start_time = mute_start;
-			mute_end_time = mute_stop;
+			mute_start_time = p_spu->i_start;
+			mute_end_time = p_spu->i_stop;
 		}
 	}
-	ofstream myfile;
 
 	if (p_sys->b_DumpTextToFileEnable)
 	{
+		ofstream myfile;
 		myfile.open("SubTextOutput.txt", ofstream::out | ofstream::app);
 		char starttime[SRT_BUF_SIZE];
 		char endtime[SRT_BUF_SIZE];
@@ -600,100 +452,116 @@ static int Decode( decoder_t *p_dec, block_t *p_block )
 
 		myfile.close();
 	}
-
-    return VLCDEC_SUCCESS;
+	//TODO: skip calling actual queue routine if don't want to render subtitle
+	//msg_Info(p_dec, "in queue sub... \n");
+	if (p_sys->b_RenderEnable == true)
+	{
+		return my_local_p_dec->pf_queue_sub(p_dec, p_spu);
+	}
+	return 0;
 }
 
 /*****************************************************************************
- * Packetize:
+ * DecoderOpen
+ *****************************************************************************
+ * Tries to launch a decoder and return score so that the interface is able
+ * to chose.
  *****************************************************************************/
-static block_t *Packetize( decoder_t *p_dec, block_t **pp_block )
+
+static int DecoderOpen( vlc_object_t *p_this )
 {
-    decoder_sys_t *p_sys = p_dec->p_sys;
+    decoder_t     *p_dec = (decoder_t*)p_this;
+	decoder_sys_t *p_sys = (decoder_sys_t *)vlc_obj_malloc(p_this, sizeof(*p_sys));
 
-    if( pp_block == NULL ) /* No Drain */
-        return NULL;
-    block_t *p_block = *pp_block; *pp_block = NULL;
-    if( p_block == NULL )
-        return NULL;
 
-    block_t *p_spu = Reassemble( p_dec, p_block );
+	if (unlikely(p_sys == NULL))
+	{
+		msg_Info(p_dec, "No MEM! \n");
+		return VLC_ENOMEM;
+	}
+	p_sys->p_subdec = (decoder_t *)vlc_object_create(p_dec, sizeof(*p_dec));
+	if (p_sys->p_subdec == NULL)
+		return VLC_EGENERIC;
 
-    if( ! p_spu )
-    {
-        return NULL;
-    }
+	// copy contents of p_dec to subdec, excluding common stuff (in obj), which causes problems if that's overwritten
+	memcpy(((char *)p_sys->p_subdec + sizeof(p_dec->obj)), ((char *)p_dec + sizeof(p_dec->obj)), (sizeof(decoder_t) - sizeof(p_dec->obj)));
 
-    p_spu->i_dts = p_spu->i_pts;
-    p_spu->i_length = 0;
+	// now assign local p_sys;
+	p_dec->p_sys = p_sys;
+	// load some config vars
+	p_sys->b_videofilterEnable = var_InheritBool(p_dec, "dvdsub-video-filter");
+	p_sys->b_audiofilterEnable = var_InheritBool(p_dec, "dvdsub-audio-filter");
+	p_sys->b_RenderEnable = var_InheritBool(p_dec, "dvdsub-render-enable");
+	p_sys->b_DumpTextToFileEnable = var_InheritBool(p_dec, "dvdsub-text-to-file-enable");
+	p_sys->b_CaptureTextPicsEnable = var_InheritBool(p_dec, "dvdsub-save-text-pic-enable");
 
-    /* reinit context */
-    p_sys->i_spu_size = 0;
-    p_sys->i_rle_size = 0;
-    p_sys->i_spu      = 0;
-    p_sys->p_block    = NULL;
+	// intercept the decoder queue routine
+	if (p_sys->b_audiofilterEnable)
+	{
+		p_sys->p_subdec->pf_queue_sub = MyDecoderQueueSub;
+	}
+	
+	// load module
+	p_sys->p_subdec->p_module = module_need(p_sys->p_subdec, "spu decoder", "spudec", true);
+	if (p_sys->p_subdec->p_module == NULL)
+	{
+		msg_Info(p_dec, "Subtitle dec: No MODULE! \n");
+		return VLC_EGENERIC;
+	}
 
-    return block_ChainGather( p_spu );
+	msg_Info(p_dec, "Subtitle dec: Made it HERE.... \n");
+
+	p_dec->pf_decode = Decode;
+	p_dec->pf_packetize = NULL;
+	// this gets initialized in submodule, so let's reuse value here
+	p_dec->fmt_out = p_sys->p_subdec->fmt_out;
+	p_dec->fmt_in = p_sys->p_subdec->fmt_in;
+
+
+	// save pointer for use later
+	my_local_p_dec = p_dec;
+
+	// MOVE somewhere else
+	msg_Info(p_dec, "\n\nLoading words file.\n\n");
+	LoadWords();
+
+	msg_Info(p_dec, "\n\nLoading filter file.\n\n");
+	LoadFilterFile(p_dec);
+		
+	
+    return VLC_SUCCESS;
 }
 
 /*****************************************************************************
- * Reassemble:
+ * Close:
  *****************************************************************************/
-static block_t *Reassemble( decoder_t *p_dec, block_t *p_block )
+static void Close( vlc_object_t *p_this )
 {
-    decoder_sys_t *p_sys = p_dec->p_sys;
+    decoder_t     *p_dec = (decoder_t*)p_this;
+    decoder_sys_t *sys = p_dec->p_sys;
 
-    if( p_block->i_flags & BLOCK_FLAG_CORRUPTED )
-    {
-        block_Release( p_block );
-        return NULL;
-    }
+	msg_Info(p_dec, "Subtitle dec: unloading module.... \n");
 
-    if( p_sys->i_spu_size <= 0 &&
-        ( p_block->i_pts <= VLC_TS_INVALID || p_block->i_buffer < 4 ) )
-    {
-        msg_Dbg( p_dec, "invalid starting packet (size < 4 or pts <=0)" );
-        //msg_Dbg( p_dec, "spu size: %d, i_pts: %"PRId64" i_buffer: %zu", p_sys->i_spu_size, p_block->i_pts, p_block->i_buffer );
-		msg_Dbg(p_dec, "spu size: %d, i_pts: %lld i_buffer: %zu", p_sys->i_spu_size, p_block->i_pts, p_block->i_buffer);
-		block_Release( p_block );
-        return NULL;
-    }
+	module_unneed(sys->p_subdec, sys->p_subdec->p_module);
+	sys->p_subdec->p_module = NULL;
+	vlc_object_release(sys->p_subdec);
+	vlc_obj_free((vlc_object_t *)p_dec, sys);
+//	var_Destroy(p_dec, "start_mute");
+//	var_Destroy(p_dec, "end_mute");
 
-    block_ChainAppend( &p_sys->p_block, p_block );
-    p_sys->i_spu += p_block->i_buffer;
+	// filter cleanup stuff
+	badwords.clear();
+	FilterFileArray.clear();
+	my_local_p_dec = NULL;
+}
 
-    if( p_sys->i_spu_size <= 0 )
-    {
-        p_sys->i_spu_size = ( p_block->p_buffer[0] << 8 )|
-            p_block->p_buffer[1];
-        p_sys->i_rle_size = ( ( p_block->p_buffer[2] << 8 )|
-            p_block->p_buffer[3] ) - 4;
+/*****************************************************************************
+ * Decode:
+ *****************************************************************************/
 
-        /* msg_Dbg( p_dec, "i_spu_size=%d i_rle=%d",
-                    p_sys->i_spu_size, p_sys->i_rle_size ); */
-
-        if( p_sys->i_spu_size <= 0 || p_sys->i_rle_size >= p_sys->i_spu_size )
-        {
-            p_sys->i_spu_size = 0;
-            p_sys->i_rle_size = 0;
-            p_sys->i_spu      = 0;
-            p_sys->p_block    = NULL;
-
-            block_Release( p_block );
-            return NULL;
-        }
-    }
-
-    if( p_sys->i_spu >= p_sys->i_spu_size )
-    {
-        /* We have a complete sub */
-        if( p_sys->i_spu > p_sys->i_spu_size )
-            msg_Dbg( p_dec, "SPU packets size=%d should be %d",
-                     p_sys->i_spu, p_sys->i_spu_size );
-
-        return p_sys->p_block;
-    }
-    return NULL;
+static int Decode( decoder_t *p_dec, block_t *p_block )
+{
+	return p_dec->p_sys->p_subdec->pf_decode(p_dec->p_sys->p_subdec, p_block);
 }
 
 

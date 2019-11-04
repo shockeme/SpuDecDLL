@@ -186,7 +186,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\..\vlc\vlc-3.0.4\src\input\input_internal.h" />
     <ClInclude Include="Config.h" />
     <ClInclude Include="spudec.h" />
     <ClInclude Include="stdafx.h" />
@@ -196,7 +195,6 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="MvFiltAudio.c" />
     <ClCompile Include="MvFiltDemux.c" />
-    <ClCompile Include="parse.c" />
     <ClCompile Include="spudec.c" />
     <ClCompile Include="SpuDecDll.cpp" />
     <ClCompile Include="stdafx.cpp">

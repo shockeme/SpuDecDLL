@@ -51,7 +51,6 @@ extern mtime_t mute_end_time;
  * Local prototypes
  *****************************************************************************/
 
-static void SetupOutputFormat(decoder_t *p_dec, bool b_trust);
 static int  DecodeAudio(decoder_t *, block_t *);
 static void Flush(decoder_t *);
 
@@ -68,13 +67,11 @@ static decoder_t * my_local_p_dec=NULL;
 // need to keeps these routines in this module, cause the p_dec passed in is for this module; from here, we can call the subdec module
 static int DecodeAudio(decoder_t *p_dec, block_t *p_block)
 {
-	//msg_Info(p_dec, "DecodeAudio... \n");
 	return p_dec->p_sys->p_subdec->pf_decode(p_dec->p_sys->p_subdec, p_block);
 }
 
 static void Flush(decoder_t *p_dec)
 {
-	//msg_Info(p_dec, "Flush... \n");
 	return p_dec->p_sys->p_subdec->pf_flush(p_dec->p_sys->p_subdec);
 }
 
@@ -86,17 +83,15 @@ static int MyDecoderQueueAudio(decoder_t *p_dec, block_t *p_aout_buf)
 	assert(p_aout_buf->p_next == NULL);
 	assert(my_local_p_dec->pf_queue_audio != NULL);
 
-	mtime_t starttime = var_GetInteger(my_local_p_dec, "start_mute");
-	mtime_t endtime = var_GetInteger(my_local_p_dec, "end_mute");
+	// TODO: get vlc vars instead of using global vars
+//	mtime_t starttime = var_GetInteger(my_local_p_dec, "start_mute");
+//	mtime_t endtime = var_GetInteger(my_local_p_dec, "end_mute");
 
 	// modify audio buffer before queueing
 	// if time falls within mute range, then clear out buf
 	if ((p_aout_buf->i_pts > mute_start_time) && (p_aout_buf->i_pts < mute_end_time))
 	{
-		for (int indx = 0; indx < p_aout_buf->i_buffer; indx++)
-		{
-			p_aout_buf->p_buffer[indx] = 0;
-		}
+		memset(p_aout_buf->p_buffer, 0, p_aout_buf->i_buffer);
 	}
 
 	return my_local_p_dec->pf_queue_audio(p_dec, p_aout_buf);
@@ -120,8 +115,8 @@ void EndAudioDec(vlc_object_t *obj)
 	sys->p_subdec->p_module = NULL;
 	vlc_obj_free((vlc_object_t *)p_dec, sys);
 	my_local_p_dec = NULL;
-	var_Destroy(p_dec, "start_mute");
-	var_Destroy(p_dec, "end_mute");
+	//var_Destroy(p_dec, "start_mute");
+	//var_Destroy(p_dec, "end_mute");
 
 }
 
@@ -147,38 +142,22 @@ int InitAudioDec(vlc_object_t *obj)
 	if (p_sys->p_subdec == NULL)
 		return VLC_EGENERIC;
 	
-	p_sys->p_subdec->fmt_in = p_dec->fmt_in;
-	p_sys->p_subdec->fmt_out = p_dec->fmt_out;
+	// copy contents of p_dec to subdec, excluding common stuff (in obj), which causes problems if that's overwritten
+	memcpy(((char *)p_sys->p_subdec + sizeof(p_dec->obj)), ((char *)p_dec + sizeof(p_dec->obj)), (sizeof(decoder_t) - sizeof(p_dec->obj)));
+	// now assign local p_sys;
+	p_dec->p_sys = p_sys;
 
-	p_sys->p_subdec->p_description = p_dec->p_description;
-	p_sys->p_subdec->p_owner = p_dec->p_owner;
-	
+	// inherit variables
+	p_sys->b_audiofilterEnable = var_InheritBool(p_dec, "dvdsub-audio-filter");
+
 	// use local queue audtio function, so we can intercept these calls
 	// can determine whether or not to do this based on input var, to enable audio filter
-	p_sys->b_audiofilterEnable = var_InheritBool(p_dec, "dvdsub-audio-filter");
 	if (p_sys->b_audiofilterEnable == true)
 	{
 		p_sys->p_subdec->pf_queue_audio = MyDecoderQueueAudio;
 	}
-	else
-	{
-		p_sys->p_subdec->pf_queue_audio = p_dec->pf_queue_audio;
-	}
 
-	p_sys->p_subdec->pf_decode = p_dec->pf_decode;
-	p_sys->p_subdec->pf_flush = p_dec->pf_flush;
-	p_sys->p_subdec->p_queue_ctx = p_dec->p_queue_ctx;
-	p_sys->p_subdec->pf_aout_format_update = p_dec->pf_aout_format_update;
-	p_sys->p_subdec->b_frame_drop_allowed = p_dec->b_frame_drop_allowed;
-	p_sys->p_subdec->i_extra_picture_buffers = p_dec->i_extra_picture_buffers;
-
-	p_sys->p_subdec->pf_packetize = p_dec->pf_packetize;
-
-	p_sys->p_subdec->pf_get_attachments = p_dec->pf_get_attachments;
-	p_sys->p_subdec->pf_get_display_date = p_dec->pf_get_display_date;
-	p_sys->p_subdec->pf_get_display_rate = p_dec->pf_get_display_rate;
-
-
+	// load module
 	p_sys->p_subdec->p_module = module_need(p_sys->p_subdec, "audio decoder", "avcodec", true);
 	if (p_sys->p_subdec->p_module == NULL)
 	{
@@ -194,10 +173,10 @@ int InitAudioDec(vlc_object_t *obj)
 	p_dec->fmt_out = p_sys->p_subdec->fmt_out;
 	p_dec->fmt_in = p_sys->p_subdec->fmt_in;
 
-	var_Create(p_dec, "start_mute", VLC_VAR_INTEGER);
-	var_Create(p_dec, "end_mute", VLC_VAR_INTEGER);
-	var_SetInteger(p_dec, "start_mute", 40000000);
-	var_SetInteger(p_dec, "end_mute", 50000000);
+	//var_Create(p_dec, "start_mute", VLC_VAR_INTEGER);
+	//var_Create(p_dec, "end_mute", VLC_VAR_INTEGER);
+	//var_SetInteger(p_dec, "start_mute", 40000000);
+	//var_SetInteger(p_dec, "end_mute", 50000000);
 
 
 	return VLC_SUCCESS;
