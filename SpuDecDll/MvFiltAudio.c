@@ -45,7 +45,8 @@
 // tmp
 extern mtime_t mute_start_time;
 extern mtime_t mute_end_time;
-
+mtime_t mute_start_time_absolute = LAST_MDATE;
+mtime_t mute_end_time_absolute;
 
 /*****************************************************************************
  * Local prototypes
@@ -79,6 +80,8 @@ static void Flush(decoder_t *p_dec)
 // need to use local pointer for calling original queue audio
 static int MyDecoderQueueAudio(decoder_t *p_dec, block_t *p_aout_buf)
 {
+	mtime_t presentation_mtime;
+
 	// this comes from decoder_QueueAudio in vlc_codec.h
 	assert(p_aout_buf->p_next == NULL);
 	assert(my_local_p_dec->pf_queue_audio != NULL);
@@ -87,11 +90,31 @@ static int MyDecoderQueueAudio(decoder_t *p_dec, block_t *p_aout_buf)
 //	mtime_t starttime = var_GetInteger(my_local_p_dec, "start_mute");
 //	mtime_t endtime = var_GetInteger(my_local_p_dec, "end_mute");
 
+	// Note:  demux sends in mute requests with absoluate time, spudec with relative time
+	// would prefer to just use relative time, but don't know how to determine that in demux, yet
+
+	if (mute_start_time_absolute != LAST_MDATE)
+	{
+		// check absoluate time first, and if a match, then convert to relative mtime
+		presentation_mtime = decoder_GetDisplayDate(p_dec, p_aout_buf->i_pts);
+		if (presentation_mtime > mute_start_time_absolute)
+		{
+			// convert to mtime instead (might conflict with spudec writing these vars, need to fix)
+			// maybe check for overlap and just extend window of mute if there is overlap??
+			mute_start_time = p_aout_buf->i_pts;
+			mute_end_time = mute_start_time + (mute_end_time_absolute - mute_start_time_absolute);
+			mute_start_time_absolute = LAST_MDATE; // tell demux we're finished queuing the mute
+		}
+	}
 	// modify audio buffer before queueing
 	// if time falls within mute range, then clear out buf
-	if ((p_aout_buf->i_pts > mute_start_time) && (p_aout_buf->i_pts < mute_end_time))
+	if ((p_aout_buf->i_pts >= mute_start_time) && (p_aout_buf->i_pts < mute_end_time))
 	{
 		memset(p_aout_buf->p_buffer, 0, p_aout_buf->i_buffer);
+	}
+	else if (mute_end_time_absolute != LAST_MDATE) // tell demux we're done muting
+	{
+		mute_end_time_absolute = LAST_MDATE;
 	}
 
 	return my_local_p_dec->pf_queue_audio(p_dec, p_aout_buf);
