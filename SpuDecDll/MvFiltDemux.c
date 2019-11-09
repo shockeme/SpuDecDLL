@@ -164,15 +164,20 @@ static int Demux( demux_t *p_demux )
 			{
 				if (my_array_entry.FilterType == L"skip")
 				{
-					// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
-					//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-					target_time = my_array_entry.endtime + 100000; // only adding 100ms for now
-					// setting position seemed to work better than time
-					demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
-					newposition = (double)target_time / (double)length;
-					demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
-					return 1; // out of for loop
-				} 
+					// todo: fix this...
+					// wait until input time hits the start time, otherwise it skips too early
+					input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
+					if (inputtime > my_array_entry.starttime)
+					{
+						// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
+						//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
+						target_time = my_array_entry.endtime + 100000; // only adding 100ms for now
+						// setting position seemed to work better than time
+						demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
+						newposition = (double)target_time / (double)length;
+						demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
+					}
+				}
 				else if (my_array_entry.FilterType == L"mute")
 				{
 					// 2 var handshake with audio decoder: start indicates to queue start and end indicates mute is finished
@@ -181,12 +186,12 @@ static int Demux( demux_t *p_demux )
 						// TODO:  Need to get proper conversion from time to mtime.  for now, treating delta time same as delta mtime
 						// get current mtime (assuming need to mute soon) using input thread... not sure if better way to do this
 						// only get absolute time from PCR SYSTEM; don't have origin, not sure how to calculate offset
-						demux_Control(p_demux, DEMUX_GET_PTS_DELAY, &pts_delay);
+						//demux_Control(p_demux, DEMUX_GET_PTS_DELAY, &pts_delay);
 						input_Control(p_input_thread, INPUT_GET_PCR_SYSTEM, &pi_system, &pi_delay);
 						mtime_time = mdate();
-						input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
-						timevartime = var_GetInteger(p_input_thread, "time");
-						es_out_Control(myesout, ES_OUT_GET_PCR_SYSTEM, &estime1, &estime2);
+						//input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
+						//timevartime = var_GetInteger(p_input_thread, "time");
+						//es_out_Control(myesout, ES_OUT_GET_PCR_SYSTEM, &estime1, &estime2);
 						// here's what i can see from time vars:
 						///  demux time:  relative time, from perspective of demux (ahead of input thread)
 						///  demux pts:  presentation time delay from demux, this seems constant @ 300ms
@@ -202,9 +207,9 @@ static int Demux( demux_t *p_demux )
 						// pi_system is absoluate time, note that it does not match mdate value
 						mute_end_time_absolute = mtime_time + pi_delay + (my_array_entry.endtime - timestamp);
 						mute_start_time_absolute = mtime_time + pi_delay; // writing to this var triggers audio filter to queue mute
-						break; // out of for loop
 					}
 				}
+				break; // out of for loop
 			}
 		}
 	}
