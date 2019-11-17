@@ -33,15 +33,69 @@
 #include <vlc_sout.h>
 #include <vlc_modules.h>
 #include <vlc_input.h>
-#include <vector>
-using namespace std;
+#include <vlc_variables.h>
 
 // tmp
 extern mtime_t mute_start_time_absolute;
 extern mtime_t mute_end_time_absolute;
+bool Local_Enable_Filters=false;
 
-// ***
-// mv to common header file?
+
+struct demux_sys_t
+{
+	demux_t    * p_subdemux;
+	bool b_videofilterEnable;
+};
+
+// for experimenting with accessing dvdnav p_sys
+#define PS_TK_COUNT (256+256+256+8 - 0xc0)
+typedef struct
+{
+	bool        b_configured;
+	bool        b_seen;
+	int         i_skip;
+	int         i_id;
+	int         i_next_block_flags;
+	es_out_id_t *es;
+	es_format_t fmt;
+	mtime_t     i_first_pts;
+	mtime_t     i_last_pts;
+
+} ps_track_t;
+struct dvdnav_demux_sys_t
+{
+	void    *dvdnav;  // pointer to dvdnav_t, which we don't have definition for
+
+	/* */
+	bool        b_reset_pcr;
+	bool        b_readahead;
+
+	struct
+	{
+		bool         b_created;
+		bool         b_enabled;
+		vlc_mutex_t  lock;
+		vlc_timer_t  timer;
+	} still;
+
+	/* track */
+	ps_track_t  tk[PS_TK_COUNT];
+};
+#define SPU_ID_BASE 0xbd20
+static inline int ps_id_to_tk(unsigned i_id)
+{
+	if (i_id <= 0xff)
+		return i_id - 0xc0;
+	else if ((i_id & 0xff00) == 0xbd00)
+		return 256 - 0xC0 + (i_id & 0xff);
+	else if ((i_id & 0xff00) == 0xfd00)
+		return 512 - 0xc0 + (i_id & 0xff);
+	else
+		return 768 - 0xc0 + (i_id & 0x07);
+}
+// end dvdnav p_sys stuff
+
+// filter file stuff
 typedef struct
 {
 	wstring FilterType;
@@ -49,14 +103,150 @@ typedef struct
 	mtime_t endtime;
 } FilterFileEntry;
 // declare as VLC var somehow?
-extern std::vector<FilterFileEntry> FilterFileArray;
-// ****
+std::vector<FilterFileEntry> FilterFileArray;
+// This routine currently hardcoded to load file named:  FilterFile.txt
+bool sortByStart(const FilterFileEntry &lhs, const FilterFileEntry &rhs) { return lhs.starttime < rhs.starttime; }
 
-struct demux_sys_t
+static void LoadFilterFile(demux_t * p_demux)
 {
-	demux_t    * p_subdemux;
-	bool b_videofilterEnable;
-};
+	std::vector<std::wstring> filterfile;
+	std::wstring filterfilename;
+	std::wstring cmdline;
+	std::wstring srttime;
+	mtime_t starttime_mt;
+	mtime_t endtime_mt;
+
+	// get name of dvdrom
+	WCHAR myDrives[105];
+	WCHAR volumeName[MAX_PATH];
+	WCHAR fileSystemName[MAX_PATH];
+	DWORD serialNumber, maxComponentLen, fileSystemFlags;
+	UINT driveType;
+
+	FilterFileArray.clear();
+
+	// todo:  don't bother with index file...unless get to a very large number of filter files
+	// maybe just have the serial number in the filter files, for those movies
+	// where dvd/filename doesn't match, can scan through filter files looking for serial number matches
+	// Would prefer to just use volume name directly to identify the movie title and the filter file, but some (older?) movies don't define a useful volume name
+	//  sooo, instead, will first use serial number (assuming this is the same for all DVD's of the same movie?)
+	//  and will use an index file which will translate from the serial number to the movie title, which will be used to load the filter file.
+	//  if none found here, will try using volume name
+
+	// if couldn't match serial number, then try setting filename based on volume name
+	if (GetVolumeInformationW(ToWide(p_demux->psz_file), volumeName, ARRAYSIZE(volumeName), &serialNumber, &maxComponentLen, &fileSystemFlags, fileSystemName, ARRAYSIZE(fileSystemName)))
+	{
+		msg_Info(p_demux, "  There is a CD/DVD in the drive:\n");
+		msg_Info(p_demux, "  Volume Name: %S\n", volumeName);
+		msg_Info(p_demux, "  Serial Number: %u\n", serialNumber);
+		msg_Info(p_demux, "  File System Name: %S\n", fileSystemName);
+		msg_Info(p_demux, "  Max Component Length: %lu\n", maxComponentLen);
+		filterfilename = volumeName;
+		filterfilename.append(L".txt");
+		filterfilename.erase(std::find(filterfilename.begin(), filterfilename.end(), L':'));
+	}
+
+	// use this folder for loading files
+	filterfilename = L"FilterFiles\\" + filterfilename;
+	msg_Info(p_demux, "Filter file Name: %S\n", filterfilename.c_str());
+	std::wifstream infile(filterfilename);
+	if (!infile)
+	{
+		msg_Info(p_demux, "Failed to load filter file: %S\n", filterfilename);
+		// at this point, should probably fail, since filter file was enabled, but file couldn't be loaded.
+	}
+	else
+	{
+		msg_Info(p_demux, "Successfully loaded filter file: %S\n", filterfilename);
+	}
+	
+	// there's probably a better way to parse this...
+	// first line is chapter num?  Is this only line formatted like this?
+	// can ignore the result of this getline
+	std::getline(infile, cmdline);
+	// first getline gets command (mute/skip)
+	while (std::getline(infile, cmdline, L';'))
+	{
+		if ((cmdline == L"mute") || (cmdline == L"skip"))
+		{
+			// next getline gets srt start time
+			std::getline(infile, srttime, L' ');
+			// process start time
+			srttime_to_mtime(starttime_mt, srttime);
+
+			// get & throw away intermediate content on line, then get srt end time
+			std::getline(infile, srttime, L' ');
+			std::getline(infile, srttime);  // remainder of line should be the srt end time
+
+			// process endtime
+			srttime_to_mtime(endtime_mt, srttime);
+
+			FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt });
+
+		}
+	}
+	// sort the list by start time
+	std::sort(FilterFileArray.begin(), FilterFileArray.end(), sortByStart);
+	//for (FilterFileEntry &n : FilterFileArray)
+	//{
+	//	msg_Info(p_demux, "type: %S, starttime: %lld\n", n.FilterType.c_str(), n.starttime);
+	//}
+
+}
+
+static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
+	vlc_value_t oldval, vlc_value_t newval, void *p_data)
+{
+	mtime_t length;
+	input_thread_t *p_input_thread = (input_thread_t*)p_this;
+	demux_t * p_demux = (demux_t *)p_data;
+	vlc_value_t val, count;
+	VLC_UNUSED(oldval); VLC_UNUSED(p_data);
+	int input_event = var_GetInteger(p_input_thread, "intf-event");
+
+	// ES pointer will change once actual movie starts
+// spu id 0 seems to be the desired one (english)
+// can read current one using p_input spu-es var
+// can read enable disable status from 'spu' var
+// seems input has ability to set es (ie. subtitle?)...or demux/interface?
+
+	// TODO:  find better way to determine if main movie title playing?  Use this as global enable/disable for filters
+	// Seems dvdnav doesn't always update title... so, will use change in length to check on change in playing main event
+	if (input_event == INPUT_EVENT_LENGTH)
+	{
+		length = var_GetInteger(p_input_thread, "length");
+		msg_Info(p_demux, "length changed: %lld", length);
+		dvdnav_demux_sys_t * dvdnav_demux_sys = (dvdnav_demux_sys_t *)p_demux->p_sys->p_subdemux->p_sys;
+		int spu_id = 0; // seems spu id of 0 gets the one we want (ie. english); may not always be the case?
+		spu_id = (var_GetInteger(p_input_thread, "spu-es") - SPU_ID_BASE);
+		vlc_object_t *p_decoder;
+		vout_thread_t *p_vout;
+		audio_output_t *p_aout;
+		// if longer than ~15 minutes or so... then assume we've started actual movie
+		if (length > 900000000)
+		{
+			msg_Info(p_demux, "main event!\n");
+			// can this simultaneous var be set once, at demux open?  or should be set on change to es?
+			//es_out_Control(p_demux->out, ES_OUT_SET_ES_CAT_POLICY, SPU_ES, ES_OUT_ES_POLICY_SIMULTANEOUS);  // may not be helpful
+					//es_out_Control(p_demux->out, ES_OUT_SET_ES, dvdnav_demux_sys->tk[ps_id_to_tk(SPU_ID_BASE + spu_id)].es, true);
+			////		input_GetEsObjects(p_demux->p_input, dvdnav_demux_sys->tk[ps_id_to_tk(SPU_ID_BASE + spu_id)].i_id, &p_decoder, &p_vout, &p_aout);
+					//msg_Info(p_demux, "p_decoder: 0x%x", p_decoder);
+			Local_Enable_Filters = true;  // set global var to enable filters; spudec uses this
+		}
+		else
+		{
+			Local_Enable_Filters = false;  // clear global var
+		}
+	}
+	if (input_event == INPUT_EVENT_ES)
+	{
+		msg_Info(p_demux, "es changed: %d", (var_GetInteger(p_input_thread, "spu-es") - SPU_ID_BASE));
+	}
+
+	return VLC_SUCCESS;
+}
+
+
 
 static int Demux( demux_t * );
 static int Control( demux_t *, int,va_list );
@@ -102,6 +292,20 @@ int DemuxOpen( vlc_object_t * p_this )
 
     p_demux->pf_demux = Demux;
     p_demux->pf_control = Control;
+
+	// try changing spu 
+	/// these vars are just dvd drive letter
+	//msg_Info(p_demux, "psz_location: %s\n", p_demux->psz_location);
+	//msg_Info(p_demux, "psz_file: %s\n", p_demux->psz_file);
+	//dvdnav_demux_sys_t * dvdnav_demux_sys = (dvdnav_demux_sys_t *)p_sys->p_subdemux->p_sys;
+	//es_out_Control(p_demux->out, ES_OUT_SET_ES, dvdnav_demux_sys->tk[ps_id_to_tk(0xbd20 + 2)], true);
+
+	msg_Info(p_demux, "\n\nLoading filter file.\n\n");
+	LoadFilterFile(p_demux);
+
+	// set up callback on any change to title
+	var_AddCallback(p_demux->p_input, "intf-event", EventCallback, p_demux); // pass in pointer to p_demux for es control
+
     return VLC_SUCCESS;
 }
 
@@ -119,6 +323,7 @@ void DemuxClose( vlc_object_t *p_this )
 	vlc_object_release(sys->p_subdemux);
 	sys->p_subdemux->p_module = NULL;
 	vlc_obj_free((vlc_object_t *)p_demux, sys);
+	FilterFileArray.clear();
 }
 
 #define SRT_BUF_SIZE 50
@@ -150,7 +355,7 @@ static int Demux( demux_t *p_demux )
 	es_out_t * myesout = p_demux->out;
 	mtime_t estime1, estime2;
 
-	if (p_demux->p_sys->b_videofilterEnable == true)
+	if ((p_demux->p_sys->b_videofilterEnable == true) && (Local_Enable_Filters == true))
 	{
 		// this generally works, but time is not lined up with presentation time
 		// if buffering gets large, then skip triggers too early, though target time on a skip seems to work as desired
@@ -176,6 +381,26 @@ static int Demux( demux_t *p_demux )
 						demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
 						newposition = (double)target_time / (double)length;
 						demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
+					}
+				}
+				else if (my_array_entry.FilterType == L"blur")
+				{
+					// todo: fix this...
+					// wait until input time hits the start time, otherwise it skips too early
+					input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
+					if (inputtime > my_array_entry.starttime)
+					{
+						// load blur/erase module
+						//// NEED to fix this to work with other module source than dvdnav (eg. mkv?)
+						// create new filter object to pass in...
+					//	p_sys->p_subdemux->p_module = module_need(p_sys->p_filter, "video filter", "erase", true);
+					//	if (p_sys->p_subdemux->p_module == NULL)
+					//	{
+					//		msg_Info(p_demux, "No MODULE! \n");
+					//		return VLC_EGENERIC;
+					//	}
+
+						// unload module when finished?
 					}
 				}
 				else if (my_array_entry.FilterType == L"mute")
@@ -214,9 +439,20 @@ static int Demux( demux_t *p_demux )
 		}
 	}
 	return p_demux->p_sys->p_subdemux->pf_demux(p_demux->p_sys->p_subdemux);
+
 }
 
 static int Control( demux_t *p_demux, int i_query, va_list args )
 {
+	/*
+	if ((i_query == DEMUX_SET_ES) )
+	{
+		 msg_Info(p_demux, "in demux control... DEMUX_SET_ES.\n");
+		 if (p_demux->info.i_update)
+		 {
+			 msg_Info(p_demux, "in demux control.  update: %d, title: %d, seek: %d\n", p_demux->info.i_update, p_demux->info.i_title, p_demux->info.i_seekpoint);
+			 }
+	}
+	*/
 	return p_demux->p_sys->p_subdemux->pf_control(p_demux->p_sys->p_subdemux, i_query, args);
 }

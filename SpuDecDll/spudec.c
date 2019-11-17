@@ -31,33 +31,17 @@
 # include "config.h"
 #endif
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <algorithm>
-#include <wctype.h>
-using namespace std;
-
 #include "vlc_plugin.h"
 #include "spudec.h"
 #include <vlc_codec.h>
 #include <vlc_common.h>
 #include <vlc_modules.h>
 
-// ***
-// mv to common header file?
-typedef struct
-{
-	wstring FilterType;
-	mtime_t starttime;
-	mtime_t endtime;
-} FilterFileEntry;
-// declare as VLC var somehow?
-std::vector<FilterFileEntry> FilterFileArray;
-// ****
+extern bool Local_Enable_Filters;
 
 static bool ParseForWords(std::wstring sentence);
+
+
 
 #define SRT_BUF_SIZE 50
 // note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
@@ -73,23 +57,6 @@ static void mtime_to_srttime(char srttimebuf[SRT_BUF_SIZE], mtime_t itime_in)
 	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
 }
 
-static void srttime_to_mtime(mtime_t &itime, std::wstring srttime)
-{
-	// format of srttime is:  hh:mm:ss,ms. <== 3 digits of ms
-	// might be a better way of doing this... but, for now... just change : and , to space to help with parsing
-	srttime[2] = ' ';
-	srttime[5] = ' ';
-	srttime[8] = ' ';
-	std::wstringstream iss(srttime);
-	unsigned int hours;
-	unsigned int minutes;
-	unsigned int seconds;
-	unsigned int milliseconds;
-	if (!(iss >> hours >> minutes >> seconds >> milliseconds)) { return; } // error
-	// stuff below doing reverse of calculations in mtime_to_srttime
-	itime = ((((((hours * 60) + minutes) * 60) + seconds) * 1000) + milliseconds) * 1000ULL;
-
-}
 
 
 /*****************************************************************************
@@ -164,151 +131,6 @@ static bool ParseForWords(std::wstring sentence)
 	}
 	return FALSE;
 }
-
-
-// This routine currently hardcoded to load file named:  FilterFile.txt
-bool sortByStart(const FilterFileEntry &lhs, const FilterFileEntry &rhs) { return lhs.starttime < rhs.starttime; }
-
-static void LoadFilterFile(decoder_t *p_dec)
-{
-	std::vector<std::wstring> filterfile;
-	std::wstring filterfilename;
-	std::wstring cmdline;
-	std::wstring srttime;
-	mtime_t starttime_mt;
-	mtime_t endtime_mt;
-
-	// get name of dvdrom
-	WCHAR myDrives[105];
-	WCHAR volumeName[MAX_PATH];
-	WCHAR fileSystemName[MAX_PATH];
-	DWORD serialNumber, maxComponentLen, fileSystemFlags;
-	UINT driveType;
-
-	FilterFileArray.clear();
-
-	if (!GetLogicalDriveStringsW(ARRAYSIZE(myDrives) - 1, myDrives))
-	{
-		msg_Info(p_dec, "GetLogicalDrives() failed with error code: %lu\n", GetLastError());
-	}
-	else
-	{
-		msg_Info(p_dec, "This machine has the following logical drives:\n");
-
-		for (LPWSTR drive = myDrives; *drive != 0; drive += 4)
-		{
-			driveType = GetDriveTypeW(drive);
-			msg_Info(p_dec, "Drive %s is type %d - ", drive, driveType);
-
-			if (driveType == DRIVE_CDROM)
-			{
-				if (GetVolumeInformationW(drive, volumeName, ARRAYSIZE(volumeName), &serialNumber, &maxComponentLen, &fileSystemFlags, fileSystemName, ARRAYSIZE(fileSystemName)))
-				{
-					msg_Info(p_dec, "  There is a CD/DVD in the drive:\n");
-					msg_Info(p_dec, "  Volume Name: %S\n", volumeName);
-					msg_Info(p_dec, "  Serial Number: %u\n", serialNumber);
-					msg_Info(p_dec, "  File System Name: %S\n", fileSystemName);
-					msg_Info(p_dec, "  Max Component Length: %lu\n", maxComponentLen);
-				}
-				else
-				{
-					msg_Info(p_dec, "  There is NO CD/DVD in the drive");
-				}
-			}
-		}
-	}
-
-	// Would prefer to just use volume name directly to identify the movie title and the filter file, but some (older?) movies don't define a useful volume name
-	//  sooo, instead, will first use serial number (assuming this is the same for all DVD's of the same movie?)
-	//  and will use an index file which will translate from the serial number to the movie title, which will be used to load the filter file.
-	//  if none found here, will try using volume name
-	std::wifstream indxinfile("FilterFiles\\FilterFile_Indx.txt");
-	if (!indxinfile)
-	{
-		msg_Info(p_dec, "Failed to load indx file. \n");
-	}
-	else
-	{
-		msg_Info(p_dec, "Successfully loaded indx file. \n");
-	}
-
-	wstring indxline;
-	wstring indxserialnumber_str;
-	unsigned int indxserialnumber;
-	wstring movietitle;
-	while (std::getline(indxinfile, indxline))
-	{
-		std::wstringstream iss(indxline);
-		if (!(iss >> indxserialnumber >> movietitle))
-		{
-			msg_Info(p_dec, " WHAT HAPPENED with indx file load???!!!!\n");
-			break;
-		} // error
-		if (indxserialnumber == serialNumber)
-		{
-			msg_Info(p_dec, "  IndxSerial Number: %u ; Movie title: %S\n", indxserialnumber, movietitle.c_str());
-			filterfilename = movietitle + L".txt";
-			break;
-		} // found our match
-	}
-	// if couldn't match serial number, then try setting filename based on volume name
-	if (filterfilename.empty())
-	{
-		filterfilename = volumeName;
-		filterfilename.append(L".txt");
-		filterfilename.erase(std::find(filterfilename.begin(), filterfilename.end(), L':'));
-	}
-
-	// use this folder for loading files
-	filterfilename = L"FilterFiles\\" + filterfilename;
-	msg_Info(p_dec, "Filter file Name: %S\n", filterfilename.c_str());
-	std::wifstream infile(filterfilename);
-	if (!infile)
-	{
-		msg_Info(p_dec, "Failed to load filter file: %S\n", filterfilename);
-		// at this point, should probably fail, since filter file was enabled, but file couldn't be loaded.
-	}
-	else
-	{
-		msg_Info(p_dec, "Successfully loaded filter file: %S\n", filterfilename);
-	}
-
-
-	// there's probably a better way to parse this...
-	// first line is chapter num?  Is this only line formatted like this?
-	// can ignore the result of this getline
-	std::getline(infile, cmdline);
-	// first getline gets command (mute/skip)
-	while (std::getline(infile, cmdline, L';'))
-	{
-		if ((cmdline == L"mute") || (cmdline == L"skip"))
-		{
-			// next getline gets srt start time
-			std::getline(infile, srttime, L' ');
-			// process start time
-			srttime_to_mtime(starttime_mt, srttime);
-
-			// get & throw away intermediate content on line, then get srt end time
-			std::getline(infile, srttime, L' ');
-			std::getline(infile, srttime);  // remainder of line should be the srt end time
-
-			// process endtime
-			srttime_to_mtime(endtime_mt, srttime);
-
-			FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt });
-
-		}
-	}
-	// sort the list by start time
-	std::sort(FilterFileArray.begin(), FilterFileArray.end(), sortByStart);
-	//for (FilterFileEntry &n : FilterFileArray)
-	//{
-	//	msg_Info(p_dec, "type: %S, starttime: %lld\n", n.FilterType.c_str(), n.starttime);
-	//}
-
-}
-
-
 
 
 
@@ -425,16 +247,13 @@ static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 	subtitle_text.assign(OcrDecodeText(sub_region, p_sys->b_CaptureTextPicsEnable));
 	toLower(subtitle_text);
 
-	//msg_Info(p_dec, "subtitle_text: %s\n", FromWide(subtitle_text.c_str()));
-	if (p_sys->b_audiofilterEnable)
+	msg_Info(p_dec, "subtitle_text: %s\n", FromWide(subtitle_text.c_str()));
+	if (ParseForWords(subtitle_text) == TRUE)
 	{
-		if (ParseForWords(subtitle_text) == TRUE)
-		{
-			// TODO:  change to use vlc vars?
-			// queue the mute
-			mute_start_time = p_spu->i_start;
-			mute_end_time = p_spu->i_stop;
-		}
+		// TODO:  change to use vlc vars?
+		// queue the mute
+		mute_start_time = p_spu->i_start;
+		mute_end_time = p_spu->i_stop;
 	}
 
 	if (p_sys->b_DumpTextToFileEnable)
@@ -473,6 +292,17 @@ static int DecoderOpen( vlc_object_t *p_this )
     decoder_t     *p_dec = (decoder_t*)p_this;
 	decoder_sys_t *p_sys = (decoder_sys_t *)vlc_obj_malloc(p_this, sizeof(*p_sys));
 
+	// load some config vars
+	p_sys->b_videofilterEnable = var_InheritBool(p_dec, "dvdsub-video-filter");
+	p_sys->b_audiofilterEnable = var_InheritBool(p_dec, "dvdsub-audio-filter");
+	p_sys->b_RenderEnable = var_InheritBool(p_dec, "dvdsub-render-enable");
+	p_sys->b_DumpTextToFileEnable = var_InheritBool(p_dec, "dvdsub-text-to-file-enable");
+	p_sys->b_CaptureTextPicsEnable = var_InheritBool(p_dec, "dvdsub-save-text-pic-enable");
+	// if filters not enabled, don't even both loading this module
+	if ((Local_Enable_Filters == false) || (p_sys->b_audiofilterEnable == false))
+	{
+		return VLC_EGENERIC;
+	}
 
 	if (unlikely(p_sys == NULL))
 	{
@@ -488,18 +318,9 @@ static int DecoderOpen( vlc_object_t *p_this )
 
 	// now assign local p_sys;
 	p_dec->p_sys = p_sys;
-	// load some config vars
-	p_sys->b_videofilterEnable = var_InheritBool(p_dec, "dvdsub-video-filter");
-	p_sys->b_audiofilterEnable = var_InheritBool(p_dec, "dvdsub-audio-filter");
-	p_sys->b_RenderEnable = var_InheritBool(p_dec, "dvdsub-render-enable");
-	p_sys->b_DumpTextToFileEnable = var_InheritBool(p_dec, "dvdsub-text-to-file-enable");
-	p_sys->b_CaptureTextPicsEnable = var_InheritBool(p_dec, "dvdsub-save-text-pic-enable");
 
 	// intercept the decoder queue routine
-	if (p_sys->b_audiofilterEnable)
-	{
-		p_sys->p_subdec->pf_queue_sub = MyDecoderQueueSub;
-	}
+	p_sys->p_subdec->pf_queue_sub = MyDecoderQueueSub;
 	
 	// load module
 	p_sys->p_subdec->p_module = module_need(p_sys->p_subdec, "spu decoder", "spudec", true);
@@ -521,14 +342,10 @@ static int DecoderOpen( vlc_object_t *p_this )
 	// save pointer for use later
 	my_local_p_dec = p_dec;
 
-	// MOVE somewhere else
+	// TODO: change how word list gets in here?
 	msg_Info(p_dec, "\n\nLoading words file.\n\n");
 	LoadWords();
 
-	msg_Info(p_dec, "\n\nLoading filter file.\n\n");
-	LoadFilterFile(p_dec);
-		
-	
     return VLC_SUCCESS;
 }
 
@@ -551,8 +368,8 @@ static void Close( vlc_object_t *p_this )
 
 	// filter cleanup stuff
 	badwords.clear();
-	FilterFileArray.clear();
 	my_local_p_dec = NULL;
+
 }
 
 /*****************************************************************************
