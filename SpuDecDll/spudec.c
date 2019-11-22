@@ -218,6 +218,7 @@ static int            Decode    ( decoder_t *, block_t * );
 static decoder_t * my_local_p_dec = NULL;
 mtime_t mute_start_time = 0;
 mtime_t mute_end_time = 0;
+bool MvFlt_SpuDec_AlreadyLoaded = false;
 
 // helper function for string comparison
 void toLower(basic_string<wchar_t>& s) {
@@ -291,6 +292,7 @@ static int DecoderOpen( vlc_object_t *p_this )
 {
     decoder_t     *p_dec = (decoder_t*)p_this;
 	decoder_sys_t *p_sys = (decoder_sys_t *)vlc_obj_malloc(p_this, sizeof(*p_sys));
+	int spu_id = -1;
 
 	// load some config vars
 	p_sys->b_videofilterEnable = var_InheritBool(p_dec, "dvdsub-video-filter");
@@ -298,20 +300,26 @@ static int DecoderOpen( vlc_object_t *p_this )
 	p_sys->b_RenderEnable = var_InheritBool(p_dec, "dvdsub-render-enable");
 	p_sys->b_DumpTextToFileEnable = var_InheritBool(p_dec, "dvdsub-text-to-file-enable");
 	p_sys->b_CaptureTextPicsEnable = var_InheritBool(p_dec, "dvdsub-save-text-pic-enable");
+	spu_id = (var_GetInteger(p_dec->obj.parent, "spu-es") - SPU_ID_BASE);
 	// if filters not enabled, don't even both loading this module
-	if ((Local_Enable_Filters == false) || (p_sys->b_audiofilterEnable == false))
+	if ((Local_Enable_Filters == false) || (p_sys->b_audiofilterEnable == false) || (spu_id != 0) || (MvFlt_SpuDec_AlreadyLoaded == true))
 	{
+		vlc_obj_free((vlc_object_t *)p_dec, p_sys);
 		return VLC_EGENERIC;
 	}
 
 	if (unlikely(p_sys == NULL))
 	{
 		msg_Info(p_dec, "No MEM! \n");
+		vlc_obj_free((vlc_object_t *)p_dec, p_sys);
 		return VLC_ENOMEM;
 	}
 	p_sys->p_subdec = (decoder_t *)vlc_object_create(p_dec, sizeof(*p_dec));
 	if (p_sys->p_subdec == NULL)
+	{
+		vlc_obj_free((vlc_object_t *)p_dec, p_sys);
 		return VLC_EGENERIC;
+	}
 
 	// copy contents of p_dec to subdec, excluding common stuff (in obj), which causes problems if that's overwritten
 	memcpy(((char *)p_sys->p_subdec + sizeof(p_dec->obj)), ((char *)p_dec + sizeof(p_dec->obj)), (sizeof(decoder_t) - sizeof(p_dec->obj)));
@@ -327,6 +335,7 @@ static int DecoderOpen( vlc_object_t *p_this )
 	if (p_sys->p_subdec->p_module == NULL)
 	{
 		msg_Info(p_dec, "Subtitle dec: No MODULE! \n");
+		vlc_obj_free((vlc_object_t *)p_dec, p_sys);
 		return VLC_EGENERIC;
 	}
 
@@ -346,6 +355,7 @@ static int DecoderOpen( vlc_object_t *p_this )
 	msg_Info(p_dec, "\n\nLoading words file.\n\n");
 	LoadWords();
 
+	MvFlt_SpuDec_AlreadyLoaded = true;
     return VLC_SUCCESS;
 }
 
@@ -369,6 +379,8 @@ static void Close( vlc_object_t *p_this )
 	// filter cleanup stuff
 	badwords.clear();
 	my_local_p_dec = NULL;
+
+	MvFlt_SpuDec_AlreadyLoaded = false;
 
 }
 

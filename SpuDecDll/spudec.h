@@ -40,6 +40,7 @@ using namespace std;
 /*****************************************************************************
  * Prototypes
  *****************************************************************************/
+#define SPU_ID_BASE 0xbd20
 
 wchar_t * OcrDecodeText(subpicture_region_t * SpuProp, bool SavePicToFile);
 

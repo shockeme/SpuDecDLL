@@ -81,7 +81,6 @@ struct dvdnav_demux_sys_t
 	/* track */
 	ps_track_t  tk[PS_TK_COUNT];
 };
-#define SPU_ID_BASE 0xbd20
 static inline int ps_id_to_tk(unsigned i_id)
 {
 	if (i_id <= 0xff)
@@ -194,6 +193,7 @@ static void LoadFilterFile(demux_t * p_demux)
 
 }
 
+static bool SpuES_Enable = false;
 static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 	vlc_value_t oldval, vlc_value_t newval, void *p_data)
 {
@@ -202,7 +202,8 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 	demux_t * p_demux = (demux_t *)p_data;
 	vlc_value_t val, count;
 	VLC_UNUSED(oldval); VLC_UNUSED(p_data);
-	int input_event = var_GetInteger(p_input_thread, "intf-event");
+	int64_t input_event = var_GetInteger(p_input_thread, "intf-event");
+	int spu_id;
 
 	// ES pointer will change once actual movie starts
 // spu id 0 seems to be the desired one (english)
@@ -216,31 +217,53 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 	{
 		length = var_GetInteger(p_input_thread, "length");
 		msg_Info(p_demux, "length changed: %lld", length);
-		dvdnav_demux_sys_t * dvdnav_demux_sys = (dvdnav_demux_sys_t *)p_demux->p_sys->p_subdemux->p_sys;
-		int spu_id = 0; // seems spu id of 0 gets the one we want (ie. english); may not always be the case?
-		spu_id = (var_GetInteger(p_input_thread, "spu-es") - SPU_ID_BASE);
-		vlc_object_t *p_decoder;
-		vout_thread_t *p_vout;
-		audio_output_t *p_aout;
 		// if longer than ~15 minutes or so... then assume we've started actual movie
 		if (length > 900000000)
 		{
 			msg_Info(p_demux, "main event!\n");
-			// can this simultaneous var be set once, at demux open?  or should be set on change to es?
-			//es_out_Control(p_demux->out, ES_OUT_SET_ES_CAT_POLICY, SPU_ES, ES_OUT_ES_POLICY_SIMULTANEOUS);  // may not be helpful
-					//es_out_Control(p_demux->out, ES_OUT_SET_ES, dvdnav_demux_sys->tk[ps_id_to_tk(SPU_ID_BASE + spu_id)].es, true);
-			////		input_GetEsObjects(p_demux->p_input, dvdnav_demux_sys->tk[ps_id_to_tk(SPU_ID_BASE + spu_id)].i_id, &p_decoder, &p_vout, &p_aout);
-					//msg_Info(p_demux, "p_decoder: 0x%x", p_decoder);
 			Local_Enable_Filters = true;  // set global var to enable filters; spudec uses this
 		}
 		else
 		{
 			Local_Enable_Filters = false;  // clear global var
+			SpuES_Enable = false;
 		}
 	}
-	if (input_event == INPUT_EVENT_ES)
+	// ES event happens too many times prior to movie start, end up getting module loaded out of order
+//	if (input_event == INPUT_EVENT_ES)
+//	{
+		//msg_Info(p_demux, "es changed: %lld, state: %lld", (var_GetInteger(p_input_thread, "spu-es") - SPU_ID_BASE), var_GetInteger(p_input_thread, "state"));
+//	}
+
+	// not sure better way to do this... seems position is last thing we can trigger on when movie actually starts playing?
+	// maybe there's some other state variable that changes that we could trigger on instead?
+	if (Local_Enable_Filters)	// this means we've started main event
 	{
-		msg_Info(p_demux, "es changed: %d", (var_GetInteger(p_input_thread, "spu-es") - SPU_ID_BASE));
+		// now, on first movement of position, then enable the spu filter
+		if (input_event == INPUT_EVENT_POSITION)
+		{
+			if (SpuES_Enable == false)
+			{
+				//msg_Info(p_demux, "position changed.");
+				// if default spu id is not off, then need to enable multiple spu
+				spu_id = (var_GetInteger(p_input_thread, "spu-es") - SPU_ID_BASE);
+				// if spu id not disabled (-1 - SPU_ID_BASE) and not the normal english track (0)
+				if (spu_id > 0)
+				{
+					// can this simultaneous var be set once, at demux open?  or should be set on change to es?
+					msg_Info(p_demux, "trying to enable multiple spu");
+					es_out_Control(p_demux->out, ES_OUT_SET_ES_CAT_POLICY, SPU_ES, ES_OUT_ES_POLICY_SIMULTANEOUS);  // may not be helpful
+				}
+				// else, just enable the spu filter
+				msg_Info(p_demux, "spu id: 0x%x", spu_id);
+				dvdnav_demux_sys_t * dvdnav_demux_sys = (dvdnav_demux_sys_t *)p_demux->p_sys->p_subdemux->p_sys;
+				spu_id = 0; // seems spu id of 0 gets the one we want (ie. english); may not always be the case?
+				var_SetInteger(p_input_thread, "spu-es", (spu_id + SPU_ID_BASE));
+				// below doesn't seem to work, need to set var above?
+				//es_out_Control(p_demux->out, ES_OUT_SET_ES, dvdnav_demux_sys->tk[ps_id_to_tk(SPU_ID_BASE + spu_id)].es, true);
+				SpuES_Enable = true;
+			}
+		}
 	}
 
 	return VLC_SUCCESS;
