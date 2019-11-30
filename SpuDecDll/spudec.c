@@ -224,7 +224,7 @@ static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 	toLower(subtitle_text);
 
 	msg_Info(p_dec, "subtitle_text: %s\n", FromWide(subtitle_text.c_str()));
-	if (ParseForWords(p_dec, subtitle_text) == TRUE)
+	if (ParseForWords(my_local_p_dec, subtitle_text) == TRUE)
 	{
 		// queue the mute
 		var_SetInteger(my_local_p_dec->obj.parent, "mute_start_time", p_spu->i_start);
