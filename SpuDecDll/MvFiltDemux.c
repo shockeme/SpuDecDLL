@@ -35,76 +35,27 @@
 #include <vlc_input.h>
 #include <vlc_variables.h>
 
-// tmp
-extern mtime_t mute_start_time_absolute;
-extern mtime_t mute_end_time_absolute;
-bool Local_Enable_Filters=false;
-
-
-struct demux_sys_t
-{
-	demux_t    * p_subdemux;
-	bool b_videofilterEnable;
-};
-
-// for experimenting with accessing dvdnav p_sys
-#define PS_TK_COUNT (256+256+256+8 - 0xc0)
-typedef struct
-{
-	bool        b_configured;
-	bool        b_seen;
-	int         i_skip;
-	int         i_id;
-	int         i_next_block_flags;
-	es_out_id_t *es;
-	es_format_t fmt;
-	mtime_t     i_first_pts;
-	mtime_t     i_last_pts;
-
-} ps_track_t;
-struct dvdnav_demux_sys_t
-{
-	void    *dvdnav;  // pointer to dvdnav_t, which we don't have definition for
-
-	/* */
-	bool        b_reset_pcr;
-	bool        b_readahead;
-
-	struct
-	{
-		bool         b_created;
-		bool         b_enabled;
-		vlc_mutex_t  lock;
-		vlc_timer_t  timer;
-	} still;
-
-	/* track */
-	ps_track_t  tk[PS_TK_COUNT];
-};
-static inline int ps_id_to_tk(unsigned i_id)
-{
-	if (i_id <= 0xff)
-		return i_id - 0xc0;
-	else if ((i_id & 0xff00) == 0xbd00)
-		return 256 - 0xC0 + (i_id & 0xff);
-	else if ((i_id & 0xff00) == 0xfd00)
-		return 512 - 0xc0 + (i_id & 0xff);
-	else
-		return 768 - 0xc0 + (i_id & 0x07);
-}
-// end dvdnav p_sys stuff
-
-// filter file stuff
 typedef struct
 {
 	wstring FilterType;
 	mtime_t starttime;
 	mtime_t endtime;
 } FilterFileEntry;
-// declare as VLC var somehow?
-std::vector<FilterFileEntry> FilterFileArray;
-// This routine currently hardcoded to load file named:  FilterFile.txt
-bool sortByStart(const FilterFileEntry &lhs, const FilterFileEntry &rhs) { return lhs.starttime < rhs.starttime; }
+
+struct demux_sys_t
+{
+	demux_t    * p_subdemux;
+	bool b_videofilterEnable;
+	bool b_useDVDTimeScaleForTimestamps;
+	bool SpuES_Enable;
+	std::vector<FilterFileEntry> FilterFileArray;
+
+	int(*OriginalEsOutSend)   (es_out_t *, es_out_id_t *, block_t *);
+};
+
+static int Demux(demux_t *);
+static int Control(demux_t *, int, va_list);
+static bool sortByStart(const FilterFileEntry &lhs, const FilterFileEntry &rhs) { return lhs.starttime < rhs.starttime; }
 
 static void LoadFilterFile(demux_t * p_demux)
 {
@@ -122,7 +73,7 @@ static void LoadFilterFile(demux_t * p_demux)
 	DWORD serialNumber, maxComponentLen, fileSystemFlags;
 	UINT driveType;
 
-	FilterFileArray.clear();
+	p_demux->p_sys->FilterFileArray.clear();
 
 	// todo:  don't bother with index file...unless get to a very large number of filter files
 	// maybe just have the serial number in the filter files, for those movies
@@ -160,9 +111,26 @@ static void LoadFilterFile(demux_t * p_demux)
 	}
 	
 	// there's probably a better way to parse this...
-	// first line is chapter num?  Is this only line formatted like this?
+	// First line either ignore or use to define using DVD time scale for timestamps
 	// can ignore the result of this getline
 	std::getline(infile, cmdline);
+	// these are combinations that work:
+	//  1.  stream mkv/mp4 with mpeg timestamps
+	//  2.  dvd with mpeg timestamps
+	//  3.  dvd with dvd time based timestamps
+	// the other option of streaming mkv/mp4 with dvd time based timestamps is not supported; there's no conversion without using actual DVD
+	if (cmdline == L"DVD_Timescale")
+	{
+		// TODO:  sanity check, make sure this demux module is using dvdnav, instead of streaming... else, illegal config.
+		// if (dvdnav==true)
+		{
+			p_demux->p_sys->b_useDVDTimeScaleForTimestamps = true;
+		}
+	}
+	else
+	{
+		p_demux->p_sys->b_useDVDTimeScaleForTimestamps = false;
+	}
 	// first getline gets command (mute/skip)
 	while (std::getline(infile, cmdline, L';'))
 	{
@@ -180,20 +148,19 @@ static void LoadFilterFile(demux_t * p_demux)
 			// process endtime
 			srttime_to_mtime(endtime_mt, srttime);
 
-			FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt });
+			p_demux->p_sys->FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt });
 
 		}
 	}
 	// sort the list by start time
-	std::sort(FilterFileArray.begin(), FilterFileArray.end(), sortByStart);
-	//for (FilterFileEntry &n : FilterFileArray)
+	std::sort(p_demux->p_sys->FilterFileArray.begin(), p_demux->p_sys->FilterFileArray.end(), sortByStart);
+	//for (FilterFileEntry &n : p_demux->p_sys->FilterFileArray)
 	//{
 	//	msg_Info(p_demux, "type: %S, starttime: %lld\n", n.FilterType.c_str(), n.starttime);
 	//}
 
 }
 
-static bool SpuES_Enable = false;
 static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 	vlc_value_t oldval, vlc_value_t newval, void *p_data)
 {
@@ -204,6 +171,9 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 	VLC_UNUSED(oldval); VLC_UNUSED(p_data);
 	int64_t input_event = var_GetInteger(p_input_thread, "intf-event");
 	int spu_id;
+	bool Local_Enable_Filters;
+
+	Local_Enable_Filters = var_GetBool(p_demux->p_input, "Local_Enable_Filters");
 
 	// ES pointer will change once actual movie starts
 // spu id 0 seems to be the desired one (english)
@@ -226,8 +196,9 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 		else
 		{
 			Local_Enable_Filters = false;  // clear global var
-			SpuES_Enable = false;
+			p_demux->p_sys->SpuES_Enable = false;
 		}
+		var_SetBool(p_demux->p_input, "Local_Enable_Filters", Local_Enable_Filters);
 	}
 	// ES event happens too many times prior to movie start, end up getting module loaded out of order
 //	if (input_event == INPUT_EVENT_ES)
@@ -242,7 +213,7 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 		// now, on first movement of position, then enable the spu filter
 		if (input_event == INPUT_EVENT_POSITION)
 		{
-			if (SpuES_Enable == false)
+			if (p_demux->p_sys->SpuES_Enable == false)
 			{
 				//msg_Info(p_demux, "position changed.");
 				// if default spu id is not off, then need to enable multiple spu
@@ -256,12 +227,11 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 				}
 				// else, just enable the spu filter
 				msg_Info(p_demux, "spu id: 0x%x", spu_id);
-				dvdnav_demux_sys_t * dvdnav_demux_sys = (dvdnav_demux_sys_t *)p_demux->p_sys->p_subdemux->p_sys;
 				spu_id = 0; // seems spu id of 0 gets the one we want (ie. english); may not always be the case?
+				// note: tried enabling ES for spu id directly, but that seems to not work, will rely on changing input var
+				//   can maybe figure out how input is doing this later and optimize
 				var_SetInteger(p_input_thread, "spu-es", (spu_id + SPU_ID_BASE));
-				// below doesn't seem to work, need to set var above?
-				//es_out_Control(p_demux->out, ES_OUT_SET_ES, dvdnav_demux_sys->tk[ps_id_to_tk(SPU_ID_BASE + spu_id)].es, true);
-				SpuES_Enable = true;
+				p_demux->p_sys->SpuES_Enable = true;
 			}
 		}
 	}
@@ -269,10 +239,27 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 	return VLC_SUCCESS;
 }
 
+// is there better way to grab this data?  dvd module demuxes & sends without making pointers to data available.
+// only doing this to get timestamp data out of packet
+static demux_t * p_LocalDemux;
+static mtime_t my_es_pts;
+static int MyEsOutSend(es_out_t *out, es_out_id_t *es, block_t *p_block)
+{
+	// cannot determine which stream since es_out_id_t is private
+	// so, just grab the pts from any non-zero data, should be close enough?
+	if (p_block->i_pts)
+	{
+		my_es_pts = p_block->i_pts;
+	}
+	p_LocalDemux->p_sys->OriginalEsOutSend(out, es, p_block);
 
-
-static int Demux( demux_t * );
-static int Control( demux_t *, int,va_list );
+	return VLC_SUCCESS;
+}
+static mtime_t GetRelativeDVDMtime(demux_t * p_demux)
+{
+	// this value should reflect the most recent timestamp from a stream sent out by dvd demux, so, should be closest approximation from current dvd position/time to relative mtime
+	return my_es_pts;
+}
 
 /**
  * Initializes the raw dump pseudo-demuxer.
@@ -316,18 +303,31 @@ int DemuxOpen( vlc_object_t * p_this )
     p_demux->pf_demux = Demux;
     p_demux->pf_control = Control;
 
-	// try changing spu 
-	/// these vars are just dvd drive letter
-	//msg_Info(p_demux, "psz_location: %s\n", p_demux->psz_location);
-	//msg_Info(p_demux, "psz_file: %s\n", p_demux->psz_file);
-	//dvdnav_demux_sys_t * dvdnav_demux_sys = (dvdnav_demux_sys_t *)p_sys->p_subdemux->p_sys;
-	//es_out_Control(p_demux->out, ES_OUT_SET_ES, dvdnav_demux_sys->tk[ps_id_to_tk(0xbd20 + 2)], true);
+	// not sure if there may be a better way to do this...
+	// hook a custom routine for sending es packets, so we can snarf the data
+	p_LocalDemux = p_demux;
+	p_sys->OriginalEsOutSend = p_demux->out->pf_send;
+	p_demux->out->pf_send = MyEsOutSend;
 
 	msg_Info(p_demux, "\n\nLoading filter file.\n\n");
 	LoadFilterFile(p_demux);
 
-	// set up callback on any change to title
+	// set up callback on any event change, to take action on different length or whatever needed
 	var_AddCallback(p_demux->p_input, "intf-event", EventCallback, p_demux); // pass in pointer to p_demux for es control
+
+	// Create some vars to be used by the filter decode modules
+	// all modules have access to input mod, so add these vars to that context
+	var_Create(p_demux->p_input, "Local_Enable_Filters", VLC_VAR_BOOL);
+	var_Create(p_demux->p_input, "mute_start_time", VLC_VAR_INTEGER);
+	var_Create(p_demux->p_input, "mute_end_time", VLC_VAR_INTEGER);
+	var_Create(p_demux->p_input, "mute_start_time_absolute", VLC_VAR_INTEGER);
+	var_Create(p_demux->p_input, "mute_end_time_absolute", VLC_VAR_INTEGER);
+	var_SetBool(p_demux->p_input, "Local_Enable_Filters", false);
+	var_SetInteger(p_demux->p_input, "mute_start_time", 0);
+	var_SetInteger(p_demux->p_input, "mute_end_time", 0);
+	var_SetInteger(p_demux->p_input, "mute_start_time_absolute", LAST_MDATE);
+	var_SetInteger(p_demux->p_input, "mute_end_time_absolute", 0);
+
 
     return VLC_SUCCESS;
 }
@@ -346,21 +346,14 @@ void DemuxClose( vlc_object_t *p_this )
 	vlc_object_release(sys->p_subdemux);
 	sys->p_subdemux->p_module = NULL;
 	vlc_obj_free((vlc_object_t *)p_demux, sys);
-	FilterFileArray.clear();
-}
+	p_demux->p_sys->FilterFileArray.clear();
 
-#define SRT_BUF_SIZE 50
-// note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
-static void mtime_to_srttime(char srttimebuf[SRT_BUF_SIZE], mtime_t itime_in)
-{
-	mtime_t n;
-	mtime_t itime;
-	itime = (itime_in + 500ULL) / 1000ULL;
-	unsigned int milliseconds = (itime) % 1000;
-	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
-	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
-	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+	var_Destroy(p_demux->p_input, "Local_Enable_Filters");
+	var_Destroy(p_demux->p_input, "mute_start_time");
+	var_Destroy(p_demux->p_input, "mute_end_time");
+	var_Destroy(p_demux->p_input, "mute_start_time_absolute");
+	var_Destroy(p_demux->p_input, "mute_end_time_absolute");
+
 }
 
 static int Demux( demux_t *p_demux )
@@ -369,62 +362,51 @@ static int Demux( demux_t *p_demux )
 	mtime_t target_time = 0;
 	double newposition;
 	int64_t length;
-	input_thread_t * p_input_thread = p_demux->p_input;
-	mtime_t pi_system, pi_delay;
-	mtime_t pts_delay;
-	mtime_t mtime_time;
-	mtime_t inputtime;
-	mtime_t timevartime;
 	es_out_t * myesout = p_demux->out;
-	mtime_t estime1, estime2;
+	bool Local_Enable_Filters;
+	mtime_t mute_start_time_absolute;
+	mtime_t mute_end_time_absolute;
+	mtime_t relative_mtime;
+	bool b_empty=false;
+
+	mute_start_time_absolute = var_GetInteger(p_demux->p_input, "mute_start_time_absolute");
+	mute_end_time_absolute = var_GetInteger(p_demux->p_input, "mute_end_time_absolute");
+	Local_Enable_Filters = var_GetBool(p_demux->p_input, "Local_Enable_Filters");
 
 	if ((p_demux->p_sys->b_videofilterEnable == true) && (Local_Enable_Filters == true))
 	{
-		// this generally works, but time is not lined up with presentation time
-		// if buffering gets large, then skip triggers too early, though target time on a skip seems to work as desired
-		//   seems setting demux position takes effect immediately, and all the buffered data is dropped?
-		// need to understanding the timing from demux/input/mdate better
+		demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
 		demux_Control(p_demux, DEMUX_GET_TIME, &timestamp);
+		relative_mtime = GetRelativeDVDMtime(p_demux);
+		if (p_demux->p_sys->b_useDVDTimeScaleForTimestamps == false)
+		{
+			// in this case, want to compare against the relative mtime, as those values should match filter file values
+			timestamp = relative_mtime;
+		}
 		// there's probably a better way to search, but for now, search in order through all entries until find match.
-		for (FilterFileEntry &my_array_entry : FilterFileArray)
+		for (FilterFileEntry &my_array_entry : p_demux->p_sys->FilterFileArray)
 		{
 			if ((timestamp > my_array_entry.starttime) && (timestamp < my_array_entry.endtime))
 			{
 				if (my_array_entry.FilterType == L"skip")
 				{
-					// todo: fix this...
-					// wait until input time hits the start time, otherwise it skips too early
-					input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
-					if (inputtime > my_array_entry.starttime)
+					// stop demuxing and wait until es is empty, then jump to target
+					es_out_Control(p_demux->out, ES_OUT_GET_EMPTY, &b_empty);
+					if (b_empty == false)
 					{
-						// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
-						//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-						target_time = my_array_entry.endtime + 100000; // only adding 100ms for now
-						// setting position seemed to work better than time
-						demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
-						newposition = (double)target_time / (double)length;
-						demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
+						// seems this sleep might be necessary; got this value from dvdnav DVDNAV_WAIT case
+						msleep(40000); 
+						return VLC_DEMUXER_SUCCESS;  // return here and skip actual demuxing
 					}
+					// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
+					//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
+					target_time = my_array_entry.endtime + 100000; // only adding 100ms for now
+					// setting position seemed to work better than time
+					newposition = (double)target_time / (double)length;
+					demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
 				}
 				else if (my_array_entry.FilterType == L"blur")
 				{
-					// todo: fix this...
-					// wait until input time hits the start time, otherwise it skips too early
-					input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
-					if (inputtime > my_array_entry.starttime)
-					{
-						// load blur/erase module
-						//// NEED to fix this to work with other module source than dvdnav (eg. mkv?)
-						// create new filter object to pass in...
-					//	p_sys->p_subdemux->p_module = module_need(p_sys->p_filter, "video filter", "erase", true);
-					//	if (p_sys->p_subdemux->p_module == NULL)
-					//	{
-					//		msg_Info(p_demux, "No MODULE! \n");
-					//		return VLC_EGENERIC;
-					//	}
-
-						// unload module when finished?
-					}
 				}
 				else if (my_array_entry.FilterType == L"mute")
 				{
@@ -435,8 +417,8 @@ static int Demux( demux_t *p_demux )
 						// get current mtime (assuming need to mute soon) using input thread... not sure if better way to do this
 						// only get absolute time from PCR SYSTEM; don't have origin, not sure how to calculate offset
 						//demux_Control(p_demux, DEMUX_GET_PTS_DELAY, &pts_delay);
-						input_Control(p_input_thread, INPUT_GET_PCR_SYSTEM, &pi_system, &pi_delay);
-						mtime_time = mdate();
+//						input_Control(p_input_thread, INPUT_GET_PCR_SYSTEM, &pi_system, &pi_delay);
+//						mtime_time = mdate();
 						//input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
 						//timevartime = var_GetInteger(p_input_thread, "time");
 						//es_out_Control(myesout, ES_OUT_GET_PCR_SYSTEM, &estime1, &estime2);
@@ -453,8 +435,13 @@ static int Demux( demux_t *p_demux )
 						// possible that diff between mdate & pi_system is how to convert between time & mtime?
 						//msg_Info(p_demux, "demux_time: %lld, demux_pts: %lld, mdate: %lld, pi_system: %lld, pi_delay: %lld, inputtime: %lld, timevar: %lld, estime1: %lld, estime2: %lld", timestamp, pts_delay, mtime_time, pi_system, pi_delay, inputtime, timevartime, estime1, estime2);
 						// pi_system is absoluate time, note that it does not match mdate value
-						mute_end_time_absolute = mtime_time + pi_delay + (my_array_entry.endtime - timestamp);
-						mute_start_time_absolute = mtime_time + pi_delay; // writing to this var triggers audio filter to queue mute
+//						mute_end_time_absolute = mtime_time + pi_delay + (my_array_entry.endtime - timestamp);
+//						mute_start_time_absolute = mtime_time + pi_delay; // writing to this var triggers audio filter to queue mute
+						mute_end_time_absolute = relative_mtime + (my_array_entry.endtime - timestamp);
+						mute_start_time_absolute = relative_mtime; // writing to this var triggers audio filter to queue mute
+						// must set end, first
+						var_SetInteger(p_demux->p_input, "mute_end_time_absolute", mute_end_time_absolute);
+						var_SetInteger(p_demux->p_input, "mute_start_time_absolute", mute_start_time_absolute);
 					}
 				}
 				break; // out of for loop
@@ -467,15 +454,5 @@ static int Demux( demux_t *p_demux )
 
 static int Control( demux_t *p_demux, int i_query, va_list args )
 {
-	/*
-	if ((i_query == DEMUX_SET_ES) )
-	{
-		 msg_Info(p_demux, "in demux control... DEMUX_SET_ES.\n");
-		 if (p_demux->info.i_update)
-		 {
-			 msg_Info(p_demux, "in demux control.  update: %d, title: %d, seek: %d\n", p_demux->info.i_update, p_demux->info.i_title, p_demux->info.i_seekpoint);
-			 }
-	}
-	*/
 	return p_demux->p_sys->p_subdemux->pf_control(p_demux->p_sys->p_subdemux, i_query, args);
 }

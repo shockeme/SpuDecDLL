@@ -37,34 +37,40 @@
 #include <vlc_common.h>
 #include <vlc_modules.h>
 
-extern bool Local_Enable_Filters;
-
-static bool ParseForWords(std::wstring sentence);
-
-
-
-#define SRT_BUF_SIZE 50
-// note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
-static void mtime_to_srttime(char srttimebuf[SRT_BUF_SIZE], mtime_t itime_in)
+struct decoder_sys_t
 {
-	mtime_t n;
-	mtime_t itime;
-	itime = (itime_in + 500ULL) / 1000ULL;
-	unsigned int milliseconds = (itime) % 1000;
-	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
-	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
-	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
-	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
-}
+	decoder_t * p_subdec;
+
+	//new
+	bool b_videofilterEnable;
+	bool b_audiofilterEnable;
+	bool b_RenderEnable;
+	bool b_DumpTextToFileEnable;
+	bool b_CaptureTextPicsEnable;
+
+	std::vector<std::wstring> badwords;
+};
 
 
+static int  Decode(decoder_t *, block_t *);
+static bool ParseForWords(std::wstring sentence);
+// spu decoder
+static int  DecoderOpen(vlc_object_t *);
+static void Close(vlc_object_t *);
+
+// audio decoder
+extern int InitAudioDec(vlc_object_t *);
+extern void EndAudioDec(vlc_object_t *);
+
+// input demux
+extern int  DemuxOpen(vlc_object_t *);
+extern void DemuxClose(vlc_object_t *);
 
 /*****************************************************************************
 * ParseForWords: parse sentence and return TRUE if a cuss word is found
 * TODO: need to get a text file parsed at the start of the movie and then store
 * the words into an array for this function
 *****************************************************************************/
-static std::vector<std::wstring> badwords;
 
 // This expects words to be listed 1 on each line with or without wildcard.  With no wildcards, then it will only match on the exact word
 // example contents for filter_words.txt:
@@ -72,13 +78,13 @@ static std::vector<std::wstring> badwords;
 //  *badword_b
 //  badword_c*
 //  *badword_d*
-static void LoadWords()
+static void LoadWords(decoder_t *p_dec)
 {
 	// Todo:  change input file format, or somehow obfuscate the contents
 	std::wifstream infile("filter_words.txt");
 	std::wstring line;
 
-	badwords.clear();
+	p_dec->p_sys->badwords.clear();
 
 	while (std::getline(infile, line))
 	{
@@ -100,17 +106,17 @@ static void LoadWords()
 				line.pop_back();
 				LastChar = L"";
 			}
-			badwords.push_back(FirstChar + line + LastChar);
+			p_dec->p_sys->badwords.push_back(FirstChar + line + LastChar);
 		}
 	}
 }
 
 // This will return true if it matches a badword in sentence
-static bool ParseForWords(std::wstring sentence)
+static bool ParseForWords(decoder_t *p_dec, std::wstring sentence)
 {
 	size_t i;
 	size_t sentenceindx;
-	for (i = 0; i < badwords.size(); i++)
+	for (i = 0; i < p_dec->p_sys->badwords.size(); i++)
 	{
 		// replace all non alpha characters, including start & end of line with space
 		// todo: is this OK?  it's replacing all non letters, including ', which will split contractions.
@@ -124,7 +130,7 @@ static bool ParseForWords(std::wstring sentence)
 		}
 		sentence.insert(0, 1, L' ');
 		sentence.push_back(L' ');
-		if (sentence.find(badwords[i]) != string::npos)
+		if (sentence.find(p_dec->p_sys->badwords[i]) != string::npos)
 		{
 			return TRUE;
 		}
@@ -138,21 +144,7 @@ static bool ParseForWords(std::wstring sentence)
 /*****************************************************************************
  * Module descriptor.
  *****************************************************************************/
-// spu decoder
-static int  DecoderOpen   ( vlc_object_t * );
-static void Close         ( vlc_object_t * );
-
-// audio decoder
-int InitAudioDec(vlc_object_t *);
-void EndAudioDec(vlc_object_t *);
-
-// input demux
-int  DemuxOpen(vlc_object_t *);
-void DemuxClose(vlc_object_t *);
-
-#define DVDSUBTRANS_DISABLE_TEXT N_("Disable DVD subtitle transparency")
-#define DVDSUBTRANS_DISABLE_LONGTEXT N_("Removes all transparency effects " \
-                                        "used in DVD subtitles.")
+// maybe should move this module descriptor stuff to the demux module?
 
 #define DVDSUBVID_FLT_DISABLE_TEXT N_("DVD Video filter")
 #define DVDSUBVID_FLT_DISABLE_LONGTEXT N_("Enables or Disables DVD Video filter.")
@@ -172,8 +164,6 @@ vlc_module_begin ()
     set_subcategory(SUBCAT_INPUT_GENERAL)
     set_callbacks( DecoderOpen, Close )
 
-	add_bool( "dvdsub-transparency", false,
-              DVDSUBTRANS_DISABLE_TEXT, DVDSUBTRANS_DISABLE_LONGTEXT, true )
 	add_bool("dvdsub-video-filter", true,
 		DVDSUBVID_FLT_DISABLE_TEXT, DVDSUBVID_FLT_DISABLE_LONGTEXT, true)
 	add_bool("dvdsub-audio-filter", true,
@@ -197,41 +187,26 @@ vlc_module_begin ()
 
 vlc_module_end ()
 
-struct decoder_sys_t
-{
-	decoder_t * p_subdec;
-
-	//new
-	bool b_videofilterEnable;
-	bool b_audiofilterEnable;
-	bool b_RenderEnable;
-	bool b_DumpTextToFileEnable;
-	bool b_CaptureTextPicsEnable;
-};
 
 
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
-static int            Decode    ( decoder_t *, block_t * );
-
-static decoder_t * my_local_p_dec = NULL;
-mtime_t mute_start_time = 0;
-mtime_t mute_end_time = 0;
-bool MvFlt_SpuDec_AlreadyLoaded = false;
 
 // helper function for string comparison
-void toLower(basic_string<wchar_t>& s) {
+static void toLower(basic_string<wchar_t>& s) {
 	for (basic_string<wchar_t>::iterator p = s.begin();
 		p != s.end(); ++p) {
 		*p = towlower(*p);
 	}
 }
+
 // note: this is called from subdecoder, so the p_dec pointer is the subdec pointer, not local one
 // need to use local pointer for calling original queue audio
 static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 {
 	std::wstring subtitle_text=L"";
+	decoder_t * my_local_p_dec = (decoder_t *)p_dec->obj.parent; // local pointer is parent of subdecoder
 	decoder_sys_t * p_sys = my_local_p_dec->p_sys;
 
 	// this comes from decoder_QueueSub in vlc_codec.h
@@ -244,17 +219,16 @@ static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 	sub_region = p_spu->p_region;
 	sub_pic = p_spu->p_region->p_picture;
 
-	// if enabled, let's parts the subtitle pic and convert to string
+	// if enabled, let's parse the subtitle pic and convert to string
 	subtitle_text.assign(OcrDecodeText(sub_region, p_sys->b_CaptureTextPicsEnable));
 	toLower(subtitle_text);
 
 	msg_Info(p_dec, "subtitle_text: %s\n", FromWide(subtitle_text.c_str()));
-	if (ParseForWords(subtitle_text) == TRUE)
+	if (ParseForWords(p_dec, subtitle_text) == TRUE)
 	{
-		// TODO:  change to use vlc vars?
 		// queue the mute
-		mute_start_time = p_spu->i_start;
-		mute_end_time = p_spu->i_stop;
+		var_SetInteger(my_local_p_dec->obj.parent, "mute_start_time", p_spu->i_start);
+		var_SetInteger(my_local_p_dec->obj.parent, "mute_end_time", p_spu->i_stop);
 	}
 
 	if (p_sys->b_DumpTextToFileEnable)
@@ -265,15 +239,13 @@ static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 		char endtime[SRT_BUF_SIZE];
 
 		mtime_to_srttime(starttime, p_spu->i_start);
-
 		mtime_to_srttime(endtime, p_spu->i_stop);
 
 		myfile << 1 << "\n" << starttime << " --> " << endtime << "\n" << FromWide(subtitle_text.c_str()) << "\n\n";
 
 		myfile.close();
 	}
-	//TODO: skip calling actual queue routine if don't want to render subtitle
-	//msg_Info(p_dec, "in queue sub... \n");
+	// skip calling actual queue routine if don't want to render subtitle
 	if (p_sys->b_RenderEnable == true)
 	{
 		return my_local_p_dec->pf_queue_sub(p_dec, p_spu);
@@ -302,7 +274,7 @@ static int DecoderOpen( vlc_object_t *p_this )
 	p_sys->b_CaptureTextPicsEnable = var_InheritBool(p_dec, "dvdsub-save-text-pic-enable");
 	spu_id = (var_GetInteger(p_dec->obj.parent, "spu-es") - SPU_ID_BASE);
 	// if filters not enabled, don't even both loading this module
-	if ((Local_Enable_Filters == false) || (p_sys->b_audiofilterEnable == false) || (spu_id != 0) || (MvFlt_SpuDec_AlreadyLoaded == true))
+	if ((var_GetBool(p_dec->obj.parent, "Local_Enable_Filters") == false) || (p_sys->b_audiofilterEnable == false) || (spu_id != 0))
 	{
 		vlc_obj_free((vlc_object_t *)p_dec, p_sys);
 		return VLC_EGENERIC;
@@ -347,15 +319,10 @@ static int DecoderOpen( vlc_object_t *p_this )
 	p_dec->fmt_out = p_sys->p_subdec->fmt_out;
 	p_dec->fmt_in = p_sys->p_subdec->fmt_in;
 
-
-	// save pointer for use later
-	my_local_p_dec = p_dec;
-
 	// TODO: change how word list gets in here?
 	msg_Info(p_dec, "\n\nLoading words file.\n\n");
-	LoadWords();
+	LoadWords(p_dec);
 
-	MvFlt_SpuDec_AlreadyLoaded = true;
     return VLC_SUCCESS;
 }
 
@@ -373,14 +340,9 @@ static void Close( vlc_object_t *p_this )
 	sys->p_subdec->p_module = NULL;
 	vlc_object_release(sys->p_subdec);
 	vlc_obj_free((vlc_object_t *)p_dec, sys);
-//	var_Destroy(p_dec, "start_mute");
-//	var_Destroy(p_dec, "end_mute");
 
 	// filter cleanup stuff
-	badwords.clear();
-	my_local_p_dec = NULL;
-
-	MvFlt_SpuDec_AlreadyLoaded = false;
+	p_dec->p_sys->badwords.clear();
 
 }
 

@@ -33,20 +33,10 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_modules.h>
-
 #include <vlc_aout.h>
-
-#include <assert.h>
-
 #include <vlc_codec.h>
 
-#include "..\libvlc.h"
 
-// tmp
-extern mtime_t mute_start_time;
-extern mtime_t mute_end_time;
-mtime_t mute_start_time_absolute = LAST_MDATE;
-mtime_t mute_end_time_absolute;
 
 /*****************************************************************************
  * Local prototypes
@@ -62,8 +52,9 @@ struct decoder_sys_t
 {
 	decoder_t *p_subdec;
 	bool b_audiofilterEnable;
+	mtime_t saved_start_mute;
+	mtime_t saved_end_mute;
 };
-static decoder_t * my_local_p_dec=NULL;
 
 // need to keeps these routines in this module, cause the p_dec passed in is for this module; from here, we can call the subdec module
 static int DecodeAudio(decoder_t *p_dec, block_t *p_block)
@@ -76,25 +67,30 @@ static void Flush(decoder_t *p_dec)
 	return p_dec->p_sys->p_subdec->pf_flush(p_dec->p_sys->p_subdec);
 }
 
-// note: this is called from subdecoder, so the p_dec pointer is the subdec pointer, not local one
-// need to use local pointer for calling original queue audio
 static int MyDecoderQueueAudio(decoder_t *p_dec, block_t *p_aout_buf)
 {
+	decoder_t * my_local_p_dec = (decoder_t *)p_dec->obj.parent; // local pointer is parent of subdecoder
 	mtime_t presentation_mtime;
+	mtime_t mute_start_time;
+	mtime_t mute_end_time;
+	mtime_t mute_start_time_absolute;
+	mtime_t mute_end_time_absolute;
 
 	// this comes from decoder_QueueAudio in vlc_codec.h
 	assert(p_aout_buf->p_next == NULL);
 	assert(my_local_p_dec->pf_queue_audio != NULL);
 
-	// TODO: get vlc vars instead of using global vars
-//	mtime_t starttime = var_GetInteger(my_local_p_dec, "start_mute");
-//	mtime_t endtime = var_GetInteger(my_local_p_dec, "end_mute");
+	// these global vars are how demux & spu dec queue mutes with this audio decoder
+	mute_start_time = var_GetInteger(my_local_p_dec->obj.parent, "mute_start_time");
+	mute_end_time = var_GetInteger(my_local_p_dec->obj.parent, "mute_end_time");
+	mute_start_time_absolute = var_GetInteger(my_local_p_dec->obj.parent, "mute_start_time_absolute");
+	mute_end_time_absolute = var_GetInteger(my_local_p_dec->obj.parent, "mute_end_time_absolute");
 
 	// Note:  demux sends in mute requests with absoluate time, spudec with relative time
 	// would prefer to just use relative time, but don't know how to determine that in demux, yet
-
 	if (mute_start_time_absolute != LAST_MDATE)
 	{
+		/*
 		// check absoluate time first, and if a match, then convert to relative mtime
 		presentation_mtime = decoder_GetDisplayDate(p_dec, p_aout_buf->i_pts);
 		if (presentation_mtime > mute_start_time_absolute)
@@ -103,20 +99,40 @@ static int MyDecoderQueueAudio(decoder_t *p_dec, block_t *p_aout_buf)
 			// maybe check for overlap and just extend window of mute if there is overlap??
 			mute_start_time = p_aout_buf->i_pts;
 			mute_end_time = mute_start_time + (mute_end_time_absolute - mute_start_time_absolute);
-			mute_start_time_absolute = LAST_MDATE; // tell demux we're finished queuing the mute
+			// tell demux we're finished queuing the mute
+			var_SetInteger(my_local_p_dec->obj.parent, "mute_start_time_absolute", mute_start_time_absolute); 
 		}
+		*/
+		// testing...
+		my_local_p_dec->p_sys->saved_start_mute = mute_start_time_absolute;
+		my_local_p_dec->p_sys->saved_end_mute = mute_end_time_absolute;
+		// tell demux we're finished queuing the mute
+		var_SetInteger(my_local_p_dec->obj.parent, "mute_start_time_absolute", LAST_MDATE);
+
 	}
+
 	// modify audio buffer before queueing
 	// if time falls within mute range, then clear out buf
 	if ((p_aout_buf->i_pts >= mute_start_time) && (p_aout_buf->i_pts < mute_end_time))
 	{
 		memset(p_aout_buf->p_buffer, 0, p_aout_buf->i_buffer);
 	}
-	else if (mute_end_time_absolute != LAST_MDATE) // tell demux we're done muting
+	if ((p_aout_buf->i_pts >= my_local_p_dec->p_sys->saved_start_mute) && (p_aout_buf->i_pts < my_local_p_dec->p_sys->saved_end_mute))
 	{
-		mute_end_time_absolute = LAST_MDATE;
+		memset(p_aout_buf->p_buffer, 0, p_aout_buf->i_buffer);
 	}
-
+	if (p_aout_buf->i_pts > my_local_p_dec->p_sys->saved_end_mute)
+	{
+		// tell demux we're done muting
+		var_SetInteger(my_local_p_dec->obj.parent, "mute_end_time_absolute", LAST_MDATE);
+	}
+	/*
+	else if (mute_end_time_absolute != LAST_MDATE) 
+	{
+		// tell demux we're done muting
+		var_SetInteger(my_local_p_dec->obj.parent, "mute_end_time_absolute", LAST_MDATE);
+	}
+	*/
 	return my_local_p_dec->pf_queue_audio(p_dec, p_aout_buf);
 }
 
@@ -137,10 +153,6 @@ void EndAudioDec(vlc_object_t *obj)
 	vlc_object_release(sys->p_subdec);
 	sys->p_subdec->p_module = NULL;
 	vlc_obj_free((vlc_object_t *)p_dec, sys);
-	my_local_p_dec = NULL;
-	//var_Destroy(p_dec, "start_mute");
-	//var_Destroy(p_dec, "end_mute");
-
 }
 
 /*****************************************************************************
@@ -153,8 +165,6 @@ int InitAudioDec(vlc_object_t *obj)
 	decoder_t *p_dec = (decoder_t *)obj;
 	decoder_sys_t *p_sys = (decoder_sys_t *)vlc_obj_malloc((vlc_object_t *)p_dec, sizeof(*p_sys));
 	p_dec->p_sys = p_sys;
-
-	my_local_p_dec = p_dec;
 
 	if (unlikely(p_sys == NULL))
 	{
@@ -195,12 +205,6 @@ int InitAudioDec(vlc_object_t *obj)
 	// this gets initialized in submodule, so let's reuse value here
 	p_dec->fmt_out = p_sys->p_subdec->fmt_out;
 	p_dec->fmt_in = p_sys->p_subdec->fmt_in;
-
-	//var_Create(p_dec, "start_mute", VLC_VAR_INTEGER);
-	//var_Create(p_dec, "end_mute", VLC_VAR_INTEGER);
-	//var_SetInteger(p_dec, "start_mute", 40000000);
-	//var_SetInteger(p_dec, "end_mute", 50000000);
-
 
 	return VLC_SUCCESS;
 }

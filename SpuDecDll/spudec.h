@@ -44,6 +44,20 @@ using namespace std;
 
 wchar_t * OcrDecodeText(subpicture_region_t * SpuProp, bool SavePicToFile);
 
+#define SRT_BUF_SIZE 50
+// note, srttimebuf must be passed in with size SRT_BUF_SIZE; todo: perhaps better way to pass in buffer?
+static inline void mtime_to_srttime(char srttimebuf[SRT_BUF_SIZE], mtime_t itime_in)
+{
+	mtime_t n;
+	mtime_t itime;
+	itime = (itime_in + 500ULL) / 1000ULL;
+	unsigned int milliseconds = (itime) % 1000;
+	unsigned int seconds = (((itime)-milliseconds) / 1000) % 60;
+	unsigned int minutes = (((((itime)-milliseconds) / 1000) - seconds) / 60) % 60;
+	unsigned int hours = ((((((itime)-milliseconds) / 1000) - seconds) / 60) - minutes) / 60;
+	n = sprintf_s(srttimebuf, SRT_BUF_SIZE, "%02d:%02d:%02d,%03d", hours, minutes, seconds, milliseconds);
+}
+
 static inline void srttime_to_mtime(mtime_t &itime, std::wstring srttime)
 {
 	// format of srttime is:  hh:mm:ss,ms. <== 3 digits of ms
