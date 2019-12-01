@@ -40,6 +40,7 @@ typedef struct
 	wstring FilterType;
 	mtime_t starttime;
 	mtime_t endtime;
+	mtime_t duration; // somewhat redundant, but for simplicity when converting between dvd timescale & mpeg timestamps
 } FilterFileEntry;
 
 struct demux_sys_t
@@ -148,7 +149,7 @@ static void LoadFilterFile(demux_t * p_demux)
 			// process endtime
 			srttime_to_mtime(endtime_mt, srttime);
 
-			p_demux->p_sys->FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt });
+			p_demux->p_sys->FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt, (endtime_mt - starttime_mt) });
 
 		}
 	}
@@ -367,6 +368,7 @@ static int Demux( demux_t *p_demux )
 	mtime_t mute_start_time_absolute;
 	mtime_t mute_end_time_absolute;
 	mtime_t relative_mtime;
+	mtime_t compare_value;
 	bool b_empty=false;
 
 	mute_start_time_absolute = var_GetInteger(p_demux->p_input, "mute_start_time_absolute");
@@ -378,15 +380,16 @@ static int Demux( demux_t *p_demux )
 		demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
 		demux_Control(p_demux, DEMUX_GET_TIME, &timestamp);
 		relative_mtime = GetRelativeDVDMtime(p_demux);
+		compare_value = timestamp;
 		if (p_demux->p_sys->b_useDVDTimeScaleForTimestamps == false)
 		{
 			// in this case, want to compare against the relative mtime, as those values should match filter file values
-			timestamp = relative_mtime;
+			compare_value = relative_mtime;
 		}
 		// there's probably a better way to search, but for now, search in order through all entries until find match.
 		for (FilterFileEntry &my_array_entry : p_demux->p_sys->FilterFileArray)
 		{
-			if ((timestamp > my_array_entry.starttime) && (timestamp < my_array_entry.endtime))
+			if ((compare_value > my_array_entry.starttime) && (compare_value < my_array_entry.endtime))
 			{
 				if (my_array_entry.FilterType == L"skip")
 				{
@@ -400,7 +403,9 @@ static int Demux( demux_t *p_demux )
 					}
 					// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
 					//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-					target_time = my_array_entry.endtime + 100000; // only adding 100ms for now
+					//// also note:  duration for dvd timescale will not exactly match mpeg timestamps, in particular for longer skips
+					//// might need to compensate for this
+					target_time = timestamp + my_array_entry.duration + 100000; // only adding 100ms for now
 					// setting position seemed to work better than time
 					newposition = (double)target_time / (double)length;
 					demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
@@ -437,7 +442,7 @@ static int Demux( demux_t *p_demux )
 						// pi_system is absoluate time, note that it does not match mdate value
 //						mute_end_time_absolute = mtime_time + pi_delay + (my_array_entry.endtime - timestamp);
 //						mute_start_time_absolute = mtime_time + pi_delay; // writing to this var triggers audio filter to queue mute
-						mute_end_time_absolute = relative_mtime + (my_array_entry.endtime - timestamp);
+						mute_end_time_absolute = relative_mtime + my_array_entry.duration;
 						mute_start_time_absolute = relative_mtime; // writing to this var triggers audio filter to queue mute
 						// must set end, first
 						var_SetInteger(p_demux->p_input, "mute_end_time_absolute", mute_end_time_absolute);
