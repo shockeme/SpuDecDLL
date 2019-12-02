@@ -244,12 +244,18 @@ static int EventCallback(vlc_object_t *p_this, char const *psz_cmd,
 // only doing this to get timestamp data out of packet
 static demux_t * p_LocalDemux;
 static mtime_t my_es_pts;
+static bool pts_changed=false;
 static int MyEsOutSend(es_out_t *out, es_out_id_t *es, block_t *p_block)
 {
 	// cannot determine which stream since es_out_id_t is private
 	// so, just grab the pts from any non-zero data, should be close enough?
+	pts_changed = false;
 	if (p_block->i_pts)
 	{
+		if (p_block->i_pts != my_es_pts)
+		{
+			pts_changed = true;
+		}
 		my_es_pts = p_block->i_pts;
 	}
 	p_LocalDemux->p_sys->OriginalEsOutSend(out, es, p_block);
@@ -370,90 +376,113 @@ static int Demux( demux_t *p_demux )
 	mtime_t relative_mtime;
 	mtime_t compare_value;
 	bool b_empty=false;
+	int returnval;
+	static bool wait_for_pts_change=false;
 
-	mute_start_time_absolute = var_GetInteger(p_demux->p_input, "mute_start_time_absolute");
-	mute_end_time_absolute = var_GetInteger(p_demux->p_input, "mute_end_time_absolute");
-	Local_Enable_Filters = var_GetBool(p_demux->p_input, "Local_Enable_Filters");
+	// call demux first
+	returnval = p_demux->p_sys->p_subdemux->pf_demux(p_demux->p_sys->p_subdemux);
 
-	if ((p_demux->p_sys->b_videofilterEnable == true) && (Local_Enable_Filters == true))
+	// then do whatever other actions are necessary
+	if (returnval != VLC_EGENERIC)
 	{
-		demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
-		demux_Control(p_demux, DEMUX_GET_TIME, &timestamp);
-		relative_mtime = GetRelativeDVDMtime(p_demux);
-		compare_value = timestamp;
-		if (p_demux->p_sys->b_useDVDTimeScaleForTimestamps == false)
+		mute_start_time_absolute = var_GetInteger(p_demux->p_input, "mute_start_time_absolute");
+		mute_end_time_absolute = var_GetInteger(p_demux->p_input, "mute_end_time_absolute");
+		Local_Enable_Filters = var_GetBool(p_demux->p_input, "Local_Enable_Filters");
+
+		if ((p_demux->p_sys->b_videofilterEnable == true) && (Local_Enable_Filters == true) && (wait_for_pts_change == false))
 		{
-			// in this case, want to compare against the relative mtime, as those values should match filter file values
-			compare_value = relative_mtime;
-		}
-		// there's probably a better way to search, but for now, search in order through all entries until find match.
-		for (FilterFileEntry &my_array_entry : p_demux->p_sys->FilterFileArray)
-		{
-			if ((compare_value > my_array_entry.starttime) && (compare_value < my_array_entry.endtime))
+			demux_Control(p_demux, DEMUX_GET_LENGTH, &length);
+			demux_Control(p_demux, DEMUX_GET_TIME, &timestamp);
+			relative_mtime = GetRelativeDVDMtime(p_demux);
+			compare_value = timestamp;
+			if (p_demux->p_sys->b_useDVDTimeScaleForTimestamps == false)
 			{
-				if (my_array_entry.FilterType == L"skip")
+				// in this case, want to compare against the relative mtime, as those values should match filter file values
+				compare_value = relative_mtime;
+			}
+			// there's probably a better way to search, but for now, search in order through all entries until find match.
+			for (FilterFileEntry &my_array_entry : p_demux->p_sys->FilterFileArray)
+			{
+				if ((compare_value > my_array_entry.starttime) && (compare_value < my_array_entry.endtime))
 				{
-					// stop demuxing and wait until es is empty, then jump to target
-					es_out_Control(p_demux->out, ES_OUT_GET_EMPTY, &b_empty);
-					if (b_empty == false)
+					if (my_array_entry.FilterType == L"skip")
 					{
-						// seems this sleep might be necessary; got this value from dvdnav DVDNAV_WAIT case
-						msleep(40000); 
-						return VLC_DEMUXER_SUCCESS;  // return here and skip actual demuxing
+						// stop demuxing and wait until es is empty, then jump to target
+						es_out_Control(p_demux->out, ES_OUT_GET_EMPTY, &b_empty);
+						if (b_empty == false)
+						{
+							// seems this sleep might be necessary; got this value from dvdnav DVDNAV_WAIT case
+							msleep(40000);
+							return returnval;  // return here and skip actual demuxing
+						}
+
+						// maybe better way to do this
+						if (p_demux->p_sys->b_useDVDTimeScaleForTimestamps == false)
+						{
+							wait_for_pts_change = true;
+						}
+
+						// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
+						//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
+						//// also note:  duration for dvd timescale will not exactly match mpeg timestamps, in particular for longer skips
+						//// might need to compensate for this
+						target_time = timestamp + my_array_entry.duration + 100000; // only adding 100ms for now
+						msg_Info(p_demux, "Skipping... timestamp: %lld, relativemtime: %lld, targettime: %lld, starttime: %lld, duration: %lld\n", timestamp, relative_mtime, target_time, my_array_entry.starttime, my_array_entry.duration);
+						// setting position seemed to work better than time
+						newposition = (double)target_time / (double)length;
+						demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
 					}
-					// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
-					//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
-					//// also note:  duration for dvd timescale will not exactly match mpeg timestamps, in particular for longer skips
-					//// might need to compensate for this
-					target_time = timestamp + my_array_entry.duration + 100000; // only adding 100ms for now
-					// setting position seemed to work better than time
-					newposition = (double)target_time / (double)length;
-					demux_Control(p_demux, DEMUX_SET_POSITION, newposition);
-				}
-				else if (my_array_entry.FilterType == L"blur")
-				{
-				}
-				else if (my_array_entry.FilterType == L"mute")
-				{
-					// 2 var handshake with audio decoder: start indicates to queue start and end indicates mute is finished
-					if ((mute_start_time_absolute == LAST_MDATE) && (mute_end_time_absolute == LAST_MDATE))
+					else if (my_array_entry.FilterType == L"blur")
 					{
-						// TODO:  Need to get proper conversion from time to mtime.  for now, treating delta time same as delta mtime
-						// get current mtime (assuming need to mute soon) using input thread... not sure if better way to do this
-						// only get absolute time from PCR SYSTEM; don't have origin, not sure how to calculate offset
-						//demux_Control(p_demux, DEMUX_GET_PTS_DELAY, &pts_delay);
-//						input_Control(p_input_thread, INPUT_GET_PCR_SYSTEM, &pi_system, &pi_delay);
-//						mtime_time = mdate();
-						//input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
-						//timevartime = var_GetInteger(p_input_thread, "time");
-						//es_out_Control(myesout, ES_OUT_GET_PCR_SYSTEM, &estime1, &estime2);
-						// here's what i can see from time vars:
-						///  demux time:  relative time, from perspective of demux (ahead of input thread)
-						///  demux pts:  presentation time delay from demux, this seems constant @ 300ms
-						///  mdate:  absolute time value
-						///  pi_system:  also absolute time value, but seems seconds different than mdate, where the diff is not constant.  don't understand...
-						///  pi_delay:  delay from demux time to input thread time
-						///  input time:  relative time as seen from input thread
-						///  timevar:  same as input time
-						///  estime1:  same as pi_system
-						///  estime2:  same as pi_delay
-						// possible that diff between mdate & pi_system is how to convert between time & mtime?
-						//msg_Info(p_demux, "demux_time: %lld, demux_pts: %lld, mdate: %lld, pi_system: %lld, pi_delay: %lld, inputtime: %lld, timevar: %lld, estime1: %lld, estime2: %lld", timestamp, pts_delay, mtime_time, pi_system, pi_delay, inputtime, timevartime, estime1, estime2);
-						// pi_system is absoluate time, note that it does not match mdate value
-//						mute_end_time_absolute = mtime_time + pi_delay + (my_array_entry.endtime - timestamp);
-//						mute_start_time_absolute = mtime_time + pi_delay; // writing to this var triggers audio filter to queue mute
-						mute_end_time_absolute = relative_mtime + my_array_entry.duration;
-						mute_start_time_absolute = relative_mtime; // writing to this var triggers audio filter to queue mute
-						// must set end, first
-						var_SetInteger(p_demux->p_input, "mute_end_time_absolute", mute_end_time_absolute);
-						var_SetInteger(p_demux->p_input, "mute_start_time_absolute", mute_start_time_absolute);
 					}
+					else if (my_array_entry.FilterType == L"mute")
+					{
+						// 2 var handshake with audio decoder: start indicates to queue start and end indicates mute is finished
+						if ((mute_start_time_absolute == LAST_MDATE) && (mute_end_time_absolute == LAST_MDATE))
+						{
+							// TODO:  Need to get proper conversion from time to mtime.  for now, treating delta time same as delta mtime
+							// get current mtime (assuming need to mute soon) using input thread... not sure if better way to do this
+							// only get absolute time from PCR SYSTEM; don't have origin, not sure how to calculate offset
+							//demux_Control(p_demux, DEMUX_GET_PTS_DELAY, &pts_delay);
+	//						input_Control(p_input_thread, INPUT_GET_PCR_SYSTEM, &pi_system, &pi_delay);
+	//						mtime_time = mdate();
+							//input_Control(p_input_thread, INPUT_GET_TIME, &inputtime);
+							//timevartime = var_GetInteger(p_input_thread, "time");
+							//es_out_Control(myesout, ES_OUT_GET_PCR_SYSTEM, &estime1, &estime2);
+							// here's what i can see from time vars:
+							///  demux time:  relative time, from perspective of demux (ahead of input thread)
+							///  demux pts:  presentation time delay from demux, this seems constant @ 300ms
+							///  mdate:  absolute time value
+							///  pi_system:  also absolute time value, but seems seconds different than mdate, where the diff is not constant.  don't understand...
+							///  pi_delay:  delay from demux time to input thread time
+							///  input time:  relative time as seen from input thread
+							///  timevar:  same as input time
+							///  estime1:  same as pi_system
+							///  estime2:  same as pi_delay
+							// possible that diff between mdate & pi_system is how to convert between time & mtime?
+							//msg_Info(p_demux, "demux_time: %lld, demux_pts: %lld, mdate: %lld, pi_system: %lld, pi_delay: %lld, inputtime: %lld, timevar: %lld, estime1: %lld, estime2: %lld", timestamp, pts_delay, mtime_time, pi_system, pi_delay, inputtime, timevartime, estime1, estime2);
+							// pi_system is absoluate time, note that it does not match mdate value
+	//						mute_end_time_absolute = mtime_time + pi_delay + (my_array_entry.endtime - timestamp);
+	//						mute_start_time_absolute = mtime_time + pi_delay; // writing to this var triggers audio filter to queue mute
+							mute_end_time_absolute = relative_mtime + my_array_entry.duration;
+							mute_start_time_absolute = relative_mtime; // writing to this var triggers audio filter to queue mute
+							// must set end, first
+							var_SetInteger(p_demux->p_input, "mute_end_time_absolute", mute_end_time_absolute);
+							var_SetInteger(p_demux->p_input, "mute_start_time_absolute", mute_start_time_absolute);
+							msg_Info(p_demux, "Muting... timestamp: %lld, relativemtime: %lld, targettime: %lld, starttime: %lld, duration: %lld\n", timestamp, relative_mtime, mute_start_time_absolute, my_array_entry.starttime, my_array_entry.duration);
+						}
+					}
+					break; // out of for loop
 				}
-				break; // out of for loop
 			}
 		}
+		if (pts_changed == true)
+		{
+			wait_for_pts_change == false;
+		}
 	}
-	return p_demux->p_sys->p_subdemux->pf_demux(p_demux->p_sys->p_subdemux);
+
+	return returnval;
 
 }
 
