@@ -37,6 +37,9 @@
 #include <vlc_common.h>
 #include <vlc_modules.h>
 
+// tried moving to decoder_sys_t, but i think problems due to dynamic size
+std::vector<std::wstring> badwords;
+
 struct decoder_sys_t
 {
 	decoder_t * p_subdec;
@@ -48,7 +51,8 @@ struct decoder_sys_t
 	bool b_DumpTextToFileEnable;
 	bool b_CaptureTextPicsEnable;
 
-	std::vector<std::wstring> badwords;
+	// i think problems having this in here due to dynamic size
+	//std::vector<std::wstring> badwords;
 };
 
 
@@ -84,7 +88,7 @@ static void LoadWords(decoder_t *p_dec)
 	std::wifstream infile("filter_words.txt");
 	std::wstring line;
 
-	p_dec->p_sys->badwords.clear();
+	badwords.clear();
 
 	while (std::getline(infile, line))
 	{
@@ -106,7 +110,7 @@ static void LoadWords(decoder_t *p_dec)
 				line.pop_back();
 				LastChar = L"";
 			}
-			p_dec->p_sys->badwords.push_back(FirstChar + line + LastChar);
+			badwords.push_back(FirstChar + line + LastChar);
 		}
 	}
 }
@@ -116,7 +120,7 @@ static bool ParseForWords(decoder_t *p_dec, std::wstring sentence)
 {
 	size_t i;
 	size_t sentenceindx;
-	for (i = 0; i < p_dec->p_sys->badwords.size(); i++)
+	for (i = 0; i < badwords.size(); i++)
 	{
 		// replace all non alpha characters, including start & end of line with space
 		// todo: is this OK?  it's replacing all non letters, including ', which will split contractions.
@@ -130,7 +134,7 @@ static bool ParseForWords(decoder_t *p_dec, std::wstring sentence)
 		}
 		sentence.insert(0, 1, L' ');
 		sentence.push_back(L' ');
-		if (sentence.find(p_dec->p_sys->badwords[i]) != string::npos)
+		if (sentence.find(badwords[i]) != string::npos)
 		{
 			return TRUE;
 		}
@@ -342,7 +346,7 @@ static void Close( vlc_object_t *p_this )
 	vlc_obj_free((vlc_object_t *)p_dec, sys);
 
 	// filter cleanup stuff
-	p_dec->p_sys->badwords.clear();
+	badwords.clear();
 
 }
 

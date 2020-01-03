@@ -42,6 +42,9 @@ typedef struct
 	mtime_t endtime;
 	mtime_t duration; // somewhat redundant, but for simplicity when converting between dvd timescale & mpeg timestamps
 } FilterFileEntry;
+// can this be moved to p_sys?
+// i think there are problems due to dynamic size
+static std::vector<FilterFileEntry> FilterFileArray;
 
 struct demux_sys_t
 {
@@ -49,7 +52,8 @@ struct demux_sys_t
 	bool b_videofilterEnable;
 	bool b_useDVDTimeScaleForTimestamps;
 	bool SpuES_Enable;
-	std::vector<FilterFileEntry> FilterFileArray;
+	// potentially problems of declaring this here due to dynamic size
+	//std::vector<FilterFileEntry> FilterFileArray;
 
 	int(*OriginalEsOutSend)   (es_out_t *, es_out_id_t *, block_t *);
 };
@@ -74,7 +78,7 @@ static void LoadFilterFile(demux_t * p_demux)
 	DWORD serialNumber, maxComponentLen, fileSystemFlags;
 	UINT driveType;
 
-	p_demux->p_sys->FilterFileArray.clear();
+	FilterFileArray.clear();
 
 	// todo:  don't bother with index file...unless get to a very large number of filter files
 	// maybe just have the serial number in the filter files, for those movies
@@ -149,13 +153,13 @@ static void LoadFilterFile(demux_t * p_demux)
 			// process endtime
 			srttime_to_mtime(endtime_mt, srttime);
 
-			p_demux->p_sys->FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt, (endtime_mt - starttime_mt) });
+			FilterFileArray.push_back({ cmdline, starttime_mt, endtime_mt, (endtime_mt - starttime_mt) });
 
 		}
 	}
 	// sort the list by start time
-	std::sort(p_demux->p_sys->FilterFileArray.begin(), p_demux->p_sys->FilterFileArray.end(), sortByStart);
-	//for (FilterFileEntry &n : p_demux->p_sys->FilterFileArray)
+	std::sort(FilterFileArray.begin(), FilterFileArray.end(), sortByStart);
+	//for (FilterFileEntry &n : FilterFileArray)
 	//{
 	//	msg_Info(p_demux, "type: %S, starttime: %lld\n", n.FilterType.c_str(), n.starttime);
 	//}
@@ -353,7 +357,7 @@ void DemuxClose( vlc_object_t *p_this )
 	vlc_object_release(sys->p_subdemux);
 	sys->p_subdemux->p_module = NULL;
 	vlc_obj_free((vlc_object_t *)p_demux, sys);
-	p_demux->p_sys->FilterFileArray.clear();
+	FilterFileArray.clear();
 
 	var_Destroy(p_demux->p_input, "Local_Enable_Filters");
 	var_Destroy(p_demux->p_input, "mute_start_time");
@@ -401,7 +405,7 @@ static int Demux( demux_t *p_demux )
 				compare_value = relative_mtime;
 			}
 			// there's probably a better way to search, but for now, search in order through all entries until find match.
-			for (FilterFileEntry &my_array_entry : p_demux->p_sys->FilterFileArray)
+			for (FilterFileEntry &my_array_entry : FilterFileArray)
 			{
 				if ((compare_value > my_array_entry.starttime) && (compare_value < my_array_entry.endtime))
 				{
