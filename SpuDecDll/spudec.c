@@ -38,7 +38,7 @@
 #include <vlc_modules.h>
 
 // tried moving to decoder_sys_t, but i think problems due to dynamic size
-std::vector<std::wstring> badwords;
+static std::vector<std::wstring> badwords;
 
 struct decoder_sys_t
 {
@@ -224,8 +224,18 @@ static int MyDecoderQueueSub(decoder_t *p_dec, subpicture_t * p_spu)
 	sub_pic = p_spu->p_region->p_picture;
 
 	// if enabled, let's parse the subtitle pic and convert to string
-	subtitle_text.assign(OcrDecodeText(sub_region, p_sys->b_CaptureTextPicsEnable));
-	toLower(subtitle_text);
+	//msg_Info(p_dec, "next sub pic size, height: %d, width: %d, pic height: %d, pic width: %d\n", sub_region->fmt.i_height, sub_region->fmt.i_width, sub_region->p_picture->format.i_height, sub_region->p_picture->format.i_width);
+	// have seen some cases where sub pic passed here has 0 height... why?  not sure, but need to skip that else ocr breaks
+	//  seems may be related to CC data somehow included in spu stream.
+	if ((sub_region->fmt.i_height == 0) || (sub_region->fmt.i_width == 0))
+	{
+		subtitle_text = L"Bad SPU pic";
+	} 
+	else
+	{
+		subtitle_text.assign(OcrDecodeText(sub_region, p_sys->b_CaptureTextPicsEnable));
+		toLower(subtitle_text);
+	}
 
 	msg_Info(p_dec, "subtitle_text: %s\n", FromWide(subtitle_text.c_str()));
 	if (ParseForWords(my_local_p_dec, subtitle_text) == TRUE)

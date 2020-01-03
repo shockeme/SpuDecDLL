@@ -339,7 +339,6 @@ int DemuxOpen( vlc_object_t * p_this )
 	var_SetInteger(p_demux->p_input, "mute_start_time_absolute", LAST_MDATE);
 	var_SetInteger(p_demux->p_input, "mute_end_time_absolute", 0);
 
-
     return VLC_SUCCESS;
 }
 
