@@ -378,6 +378,7 @@ static int Demux( demux_t *p_demux )
 	mtime_t mute_end_time_absolute;
 	mtime_t relative_mtime;
 	mtime_t compare_value;
+	mtime_t remaining_skip_time;
 	bool b_empty=false;
 	int returnval;
 	static bool wait_for_pts_change=false;
@@ -426,10 +427,13 @@ static int Demux( demux_t *p_demux )
 						}
 
 						// todo:  not sure if added buffer needed anymore... not sure how frequently timer tick is updated
-						//    fixme... need to add ~400ms to make sure new time doesn't fall into this same window, it seems not precise
 						//// also note:  duration for dvd timescale will not exactly match mpeg timestamps, in particular for longer skips
 						//// might need to compensate for this
-						target_time = timestamp + my_array_entry.duration + 100000; // only adding 100ms for now
+						//// for now, using the diff between endtime & compare value to determine how much extra time to skip.
+						//// this scheme may result in effectively skipping multiple times for 1 desired "skip", but should hopefully cover the entire 
+						//// skip section, even if multiple jumps needed
+						remaining_skip_time = my_array_entry.endtime - compare_value;
+						target_time = timestamp + remaining_skip_time;
 						msg_Info(p_demux, "Skipping... timestamp: %lld, relativemtime: %lld, targettime: %lld, starttime: %lld, duration: %lld\n", timestamp, relative_mtime, target_time, my_array_entry.starttime, my_array_entry.duration);
 						// setting position seemed to work better than time
 						newposition = (double)target_time / (double)length;
