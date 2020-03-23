@@ -72,8 +72,8 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
-    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);..\..\..\vlc\vlc-3.0.4-win32\vlc-3.0.4\sdk\include\vlc\plugins;</IncludePath>
-    <LibraryPath>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);$(NETFXKitsDir)Lib\um\x86;..\..\..\vlc\vlc-3.0.4-win32\vlc-3.0.4\sdk\lib</LibraryPath>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\include\vlc\plugins;</IncludePath>
+    <LibraryPath>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);$(NETFXKitsDir)Lib\um\x86;..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\lib</LibraryPath>
     <TargetName>libmovfltr_plugin</TargetName>
     <GenerateManifest>false</GenerateManifest>
     <IgnoreImportLibrary>false</IgnoreImportLibrary>
@@ -120,7 +120,7 @@
       <LinkLibraryDependencies>true</LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>copy /y ..\Debug\libmovfltr_plugin.dll  ..\..\..\vlc\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec</Command>
+      <Command>copy /y ..\Debug\libmovfltr_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
