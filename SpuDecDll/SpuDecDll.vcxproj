@@ -120,7 +120,7 @@
       <LinkLibraryDependencies>true</LinkLibraryDependencies>
     </ProjectReference>
     <PostBuildEvent>
-      <Command>copy /y ..\Debug\libmovfltr_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec</Command>
+      <Command>copy /y Debug\libmovfltr_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
