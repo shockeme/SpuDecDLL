@@ -1,30 +1,61 @@
-download vlc-3.0.4-win32.7z from http://download.videolan.org/pub/videolan/vlc/
+Install steps for Development Mode:
+1. Create "vlc" folder in some work area on your drive.  Actual location is arbitrary.
+2. Download the following packages into the "vlc" folder created above.
+	download vlc-3.0.4-win32.7z from http://download.videolan.org/pub/videolan/vlc/
 
+	github.com/shockeme
+	https://github.com/shockeme/SpuDecDll.git
+	Look for SpuDecDLL and clone it into your c drive OR download the zip of spudecdll
+3. Unzip the packages above in the vlc folder.  This should result in 2 folders inside of the vlc folder:
+	SpuDecDll-master
+	vlc-3.0.4-win32
+4. Temp... until we get install package... Copy the FilterFiles folder (should be on git?) AND the filter_words.txt file into:
+	vlc\vlc-3.0.4-win32\vlc-3.0.4
 
-github.com/shockeme
-https://github.com/shockeme/SpuDecDll.git
-Look for SpuDecDLL and clone it into your c drive:
-
-
-Directory Structure:
-stuff
-     |--vlc
-	   |---SpuDecDll
-		    |---Debug
-			|---SpuDecDll
-				|---<files>
-			|---SpuDecDll.sln
+Directory Structure Should look like:
+|--vlc
+	|---SpuDecDll-master
+		|---Debug <This is where libmovfltr_plugin.dll is created after build>
+		|---SpuDecDll
+			|---SpuDecDll.vcxproj <if opening .sln file doesn't work, try this one>
 			|---<files>
-	   |---vlc-3.04-win32
-		        |---vlc-3.0.4
+		|---SpuDecDll.sln
+		|---SpuDecDLL_Setup.txt <ie. this file>
+		|---<files>
+	|---vlc-3.04-win32
+	        |---vlc-3.0.4
 			|---sdk
 			|---plugins
-			|---<etc...>
+				|---codec <This is where libmovfltr_plugin.dll is copied to in post build event>
+			|--- vlc.exe <This is THE vlc executable (for development purposes)>
+			|--- FilterFiles <Folder that contains all skip and other filter files; copied manually for now>
+				|--- MARVELS_THE_AVENGERS.txt <example name of filter file>
+			|--- filter_words.txt <Contains all words/phrases to be filter, based on subtitles; copied here manually, for now>
 			|---<files>
 
-You will need to make sure the following settings are correct in the Project/Properties:
-Include Directories: ..\..\..\vlc\vlc-3.0.4-win32\vlc-3.0.4\sdk\include\vlc\plugins;
-Library Directories:..\..\..\vlc\vlc-3.0.4-win32\vlc-3.0.4\sdk\lib
-Build Events->Post Build Events: copy /y ..\Debug\libspudec_plugin.dll  ..\..\..\vlc\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec
+For executing/test program, launch:
+	vlc\vlc-3.0.4-win32\vlc-3.0.4\vlc.exe
 
-I have had numerous failures due to the above paths being incorrect.
+For modifying dll, currently building with MS Visual Studio 2017 (Version 15.8.7, not sure specific version matters, though), open:
+	vlc\SpuDecDll-master\SpuDecDll.sln
+	if above doesn't work, try:
+	vlc\SpuDecDll-master\SpuDecDll\SpuDecDll.vcxproj <== note, after loading this, you'll need to save a new solution (.sln), overwrite original
+
+Assuming directory structure above, you will need to make sure the following settings are correct in the Project/Properties:
+Include Directories: ..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\include\vlc\plugins;
+Library Directories:..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\lib
+Build Events->Post Build Events: copy /y ..\Debug\libspudec_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec
+
+The DLL (libmovfltr_plugin.dll) contains 3 VLC plugins:
+	Audio (MvFiltAudio.c) - This implements actual audio filters, based on input from spudec and demux
+	Spudec (MvFiltDemux.c) - This parses subtitles and filter_words file to determine when to mute; sends mute requests to audio plugin
+	Demux (spudec.c) - This parses the filter file and will implement skips directly and submit mute requests to audio plugin
+
+VLC can be configured to load & start playing DVD by default.  You can do this with shortcut on desktop by modifying 'target' field to run:
+	vlc\vlc-3.0.4-win32\vlc-3.0.4\vlc.exe dvd:///D:
+	Note:  Change "D:" to match whatever your DVD drive letter is.  Also, this could be a network drive mapped to a DVD drive on a different computer.
+VLC can also be configured to start in full screen mode by going to Tools->Preferences, and check the 'fullscreen' box on the 'Video' tab.
+The libmovfltr_plugin.dll options can be found on the preferences page:
+	1.  Click the 'All' button in the Show Settings box on lower left corner
+	2.  Scroll down to Input/Codecs section on left and select 'Movie filter'.  Video & Audio filters should be checked (enabled) by default.  Others should not.
+		These options can be modified/add/removed as needed.

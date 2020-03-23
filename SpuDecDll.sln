@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 15
-VisualStudioVersion = 15.0.28010.2026
+VisualStudioVersion = 15.0.28010.2046
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "SpuDecDll", "SpuDecDll\SpuDecDll.vcxproj", "{05FF444E-5A30-47AA-9B2E-62D3664FBA2F}"
 EndProject
@@ -26,6 +26,6 @@ Global
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
-		SolutionGuid = {E3636A9E-2890-4E87-8648-DE04D79F6EB1}
+		SolutionGuid = {1A8B8D19-C121-492E-AEF5-769B0D0A6D1E}
 	EndGlobalSection
 EndGlobal
