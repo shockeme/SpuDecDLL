@@ -9,18 +9,21 @@ Install steps for Development Mode:
 3. Unzip the packages above in the vlc folder.  This should result in 2 folders inside of the vlc folder:
 	SpuDecDll-master
 	vlc-3.0.4-win32
-4. Temp... until we get install package... Copy the FilterFiles folder (should be on git?) AND the filter_words.txt file into:
+4. Temp... until we get install package... Copy the FilterFiles folder AND the filter_words.txt file into:
 	vlc\vlc-3.0.4-win32\vlc-3.0.4
 
 Directory Structure Should look like:
 |--vlc
 	|---SpuDecDll-master
-		|---Debug <This is where libmovfltr_plugin.dll is created after build>
 		|---SpuDecDll
-			|---SpuDecDll.vcxproj <if opening .sln file doesn't work, try this one>
+			|---Debug <This is where libmovfltr_plugin.dll is created after build>
+			|---SpuDecDll.vcxproj <1st time working on project, open this file>
+			|---SpuDecDll.sln <Will not exist the first time you open project above>
 			|---<files>
-		|---SpuDecDll.sln
 		|---SpuDecDLL_Setup.txt <ie. this file>
+		|---filter_words.txt <example filter file; copy over to vlc-3.0.4 folder and modify as desired
+		|---FilterFiles <Folder that holds example filter files; copy folder over to vlc-3.0.4 folder and modify as desired>
+			|---MARVELS_THE_AVENGERS.txt <example filter file; For use with DVD directly>
 		|---<files>
 	|---vlc-3.04-win32
 	        |---vlc-3.0.4
@@ -29,23 +32,27 @@ Directory Structure Should look like:
 				|---codec <This is where libmovfltr_plugin.dll is copied to in post build event>
 			|--- vlc.exe <This is THE vlc executable (for development purposes)>
 			|--- FilterFiles <Folder that contains all skip and other filter files; copied manually for now>
-				|--- MARVELS_THE_AVENGERS.txt <example name of filter file>
+				|--- MARVELS_THE_AVENGERS.txt <example name of filter file; name must match name of DVD>
 			|--- filter_words.txt <Contains all words/phrases to be filter, based on subtitles; copied here manually, for now>
 			|---<files>
 
 For executing/test program, launch:
 	vlc\vlc-3.0.4-win32\vlc-3.0.4\vlc.exe
 
-For modifying dll, currently building with MS Visual Studio 2017 (Version 15.8.7, not sure specific version matters, though), open:
-	vlc\SpuDecDll-master\SpuDecDll.sln
-	if above doesn't work, try:
-	vlc\SpuDecDll-master\SpuDecDll\SpuDecDll.vcxproj <== note, after loading this, you'll need to save a new solution (.sln), overwrite original
-
+Currently building with MS Visual Studio 2017 (Version 15.8.7, not sure specific version matters, though)
+For modifying dll:
+	open this project with MS VisualStudio:  vlc\SpuDecDll-master\SpuDecDll\SpuDecDll.vcxproj
+	This step needs to be done only once:
+		Highlight the Solution 'SpuDecDll' line in the 'Solution Explorer' window, then click 'File->Save SpuDecDll.sln', then click 'save'.
+		Above will save new solution (.sln) file.  Don't bother uploading to git, it can't be loaded directly by others.  But, this sln file can be used to load project from now on.
+	Can try building project now... it should be successful.  If not... can check a few settings here:
 Assuming directory structure above, you will need to make sure the following settings are correct in the Project/Properties:
 Include Directories: ..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\include\vlc\plugins;
 Library Directories:..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\lib
-Build Events->Post Build Events: copy /y ..\Debug\libspudec_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec
+Build Events->Post Build Events: copy /y Debug\libspudec_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec
 
+---------------------------------------------------------------------------------------------------------------------------------
+Hopefully useful info:
 The DLL (libmovfltr_plugin.dll) contains 3 VLC plugins:
 	Audio (MvFiltAudio.c) - This implements actual audio filters, based on input from spudec and demux
 	Spudec (MvFiltDemux.c) - This parses subtitles and filter_words file to determine when to mute; sends mute requests to audio plugin
