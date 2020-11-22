@@ -2,7 +2,7 @@ Install steps for Development Mode:
 1. Create "vlc" folder in some work area on your drive.  Actual location is arbitrary.
 2. Download the following packages into the "vlc" folder created above.
 	download vlc-3.0.4-win32.7z from http://download.videolan.org/pub/videolan/vlc/
-
+		Note:  7z package above appears to be only compressed package that includes SDK, which is needed for compiling the dll
 	github.com/shockeme
 	https://github.com/shockeme/SpuDecDll.git
 	Look for SpuDecDLL and clone it into your c drive OR download the zip of spudecdll
@@ -45,11 +45,14 @@ For modifying dll:
 	This step needs to be done only once:
 		Highlight the Solution 'SpuDecDll' line in the 'Solution Explorer' window, then click 'File->Save SpuDecDll.sln', then click 'save'.
 		Above will save new solution (.sln) file.  Don't bother uploading to git, it can't be loaded directly by others.  But, this sln file can be used to load project from now on.
-	Can try building project now... it should be successful.  If not... can check a few settings here:
+	Can try building project now... It might report a need to update SDK version; go ahead and update to whatever is on your system.
+        	At this point, the build should be successful.  If not... can check a few settings here:
 Assuming directory structure above, you will need to make sure the following settings are correct in the Project/Properties:
 Include Directories: ..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\include\vlc\plugins;
 Library Directories:..\..\vlc-3.0.4-win32\vlc-3.0.4\sdk\lib
 Build Events->Post Build Events: copy /y Debug\libspudec_plugin.dll  ..\..\vlc-3.0.4-win32\vlc-3.0.4\plugins\codec
+
+Build the 'release' version to create a dll that can be copied & used on a computer that does not have Visual Studio installed.
 
 ---------------------------------------------------------------------------------------------------------------------------------
 Hopefully useful info:
